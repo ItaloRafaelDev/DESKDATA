@@ -1,0 +1,40 @@
+node_modules/
+out/
+dist/
+output/
+.env
+.env.*
+*.log
+.DS_Store
+
+# Dados locais e artefatos de distribuição
+backups/
+release/
+*.sqlite
+*.sqlite-*
+*.bin
+
+# Exclusoes de seguranca para publicacao
+!.env.example
+*.sqlite3
+*.db
+*.db-*
+*.pdf
+*.zip
+*.7z
+*.rar
+*.jsonl
+*.tmp
+*.bak
+coverage/
+
+# Private operational files - do not commit
+coverage/
+logs/
+.npmrc
+*.pfx
+*.p12
+*.pem
+*.key
+credentials.json
+secrets.json

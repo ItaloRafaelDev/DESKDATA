@@ -1,0 +1,65 @@
+{
+  "name": "deskdata-desktop",
+  "version": "0.1.13",
+  "private": true,
+  "type": "module",
+  "description": "Aplicativo desktop de consultas e relatórios em PDF com histórico cifrado",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "predev": "install-electron --no",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test:demo": "node --experimental-strip-types scripts/create-demo.mjs",
+    "test:demo:pis": "node --experimental-strip-types scripts/create-pis-demo.mjs pis-demonstracao.html",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:demo:cnpj": "node --experimental-strip-types scripts/create-company-demo.mjs",
+    "dist:win": "npm run typecheck && npm run build && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^45.1.0",
+    "electron-vite": "^6.0.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.0",
+    "electron-builder": "26.18.0"
+  },
+  "main": "./out/main/index.js",
+  "build": {
+    "appId": "local.deskdata.relatorios",
+    "productName": "DESKDATA Relatórios",
+    "asar": true,
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "DESKDATA-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "forceCodeSigning": true,
+    "publish": null
+  }
+}

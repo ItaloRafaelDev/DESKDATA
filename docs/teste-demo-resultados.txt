@@ -1,0 +1,7 @@
+
+> deskdata-desktop@0.1.0 test:demo
+> node --experimental-strip-types scripts/create-demo.mjs
+
+(node:1785) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+HTML demonstrativo gerado em examples/modelo-01-demonstracao.html (sem consultas reais).
