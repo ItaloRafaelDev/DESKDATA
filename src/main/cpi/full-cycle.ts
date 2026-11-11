@@ -26,7 +26,7 @@ export interface FullCycleServices {
   submitCpf(cpf:string,callback:(code:string)=>Promise<void>):Promise<{state:'pending';queryCode:string}|{state:'ready';queryCode?:string;payload:unknown}>;
   fetchByCode(code:string):Promise<{payload:unknown;queryCode:string}>;
   savePdf(cpf:string,recordId:string,queryCode:string|undefined,data:NormalizedData):Promise<void>;
-  uploadAndSave(pdfPath:string,classification:'restrictions'|'information'):Promise<'confirmed'|'confirmed_auxiliary_404'|'unverified'>;
+  uploadAndSave(pdfPath:string,classification:'restrictions'|'information'):Promise<'confirmed'|'confirmed_auxiliary_404'|'unverified'|'not_submitted'>;
   closeCompletedDetail():Promise<void>;
 }
 function outcome(args:FullCycleServices,state:CpiCycleOutcome['state'],message:string,warning?:CpiCycleOutcome['warning']):CpiCycleOutcome {
@@ -38,14 +38,14 @@ function outcome(args:FullCycleServices,state:CpiCycleOutcome['state'],message:s
  */
 export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycleOutcome>{
   if(!s.outputFolder)throw new Error('Configure a pasta de PDFs antes de iniciar a automação.');
-  const cpf=await s.getCpf();
-  if(!isValidCpf(cpf))throw new Error('CPF do detalhe CPI inválido.');
   let job=await s.getJob();
-  if(!job)job=await s.claim();
-  if(['completed','submit_started','verification_required','review_required'].includes(job.stage)){
+  if(job&&['completed','submit_started','verification_required','review_required'].includes(job.stage)){
     return outcome(s,job.stage==='completed'?'completed':'review_required',
       'Esta solicitação já foi processada ou requer verificação manual; nenhum envio repetido.');
   }
+  const cpf=await s.getCpf();
+  if(!isValidCpf(cpf))throw new Error('CPF do detalhe CPI inválido.');
+  if(!job)job=await s.claim();
   const latest=await s.findLatest(cpf);
   let record=latest;
   let payload:unknown;
@@ -105,7 +105,16 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
   await s.mark('pdf_ready',{historyRecordId:record.id,classification:classification.result});
   // Sem retry após esta marcação: eventual timeout ou queda pode significar envio já aceito.
   await s.mark('submit_started');
-  const confirmation=await s.uploadAndSave(pdf,classification.result);
+  let confirmation:Awaited<ReturnType<FullCycleServices['uploadAndSave']>>;
+  try{confirmation=await s.uploadAndSave(pdf,classification.result);}
+  catch{
+    await s.mark('verification_required');
+    return outcome(s,'verification_required','Falha após o checkpoint de envio; resultado remoto incerto. Verificar manualmente, sem reenvio.');
+  }
+  if(confirmation==='not_submitted'){
+    await s.mark('review_required');
+    return outcome(s,'review_required','Falha comprovada antes de anexar ou submeter o formulário. PDF e classificação preservados; revisão manual necessária.');
+  }
   if(confirmation==='confirmed'||confirmation==='confirmed_auxiliary_404'){
     await s.mark('completed');
     try {

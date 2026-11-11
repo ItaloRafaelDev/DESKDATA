@@ -92,7 +92,7 @@ export class CpiWorkflowStore {
       if(index<0)throw new Error('Solicitação CPI não registrada.');
       const before=db.items[index];
       if((['completed','verification_required'].includes(before.stage) && stage!==before.stage) ||
-        (before.stage==='submit_started' && !['submit_started','completed','verification_required'].includes(stage))){
+        (before.stage==='submit_started' && !['submit_started','completed','verification_required','review_required'].includes(stage))){
         throw new Error('Envio CPI já iniciado ou encerrado; não será repetido automaticamente.');
       }
       const after:CpiWorkItem={...before,...updates,stage,updatedAt:new Date().toISOString()};

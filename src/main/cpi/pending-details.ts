@@ -23,6 +23,67 @@ export interface CpiRawPersonDetails {
   status: string;
 }
 
+export interface CpiDetailDomSnapshot {
+  titles:string[];
+  cpfText:string;
+  pesquisaType:string;
+  status:string;
+  savedStatus:string;
+  savedResult:string;
+  savedSource:string;
+  responseTimestamp:string;
+  pdfDocument:string;
+  editableUploadPresent:boolean;
+  errorSignals:string;
+  businessErrorVisible:boolean;
+}
+
+/** Executada no frame: somente campos conhecidos, nunca o corpo completo cruza a fronteira. */
+export function readCpiDetailDom():CpiDetailDomSnapshot {
+  const norm=(text:string)=>text.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim().toUpperCase();
+  const titles=Array.from(document.querySelectorAll('h1,h2,h3,.mt'))
+    .map(node=>(node as HTMLElement).innerText?.trim()??node.textContent?.trim()??'').filter(Boolean).slice(0,30);
+  const visibleText=(document.body?.innerText??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
+  for(const line of visibleText.split(/\r?\n/)){
+    const sol=line.trim().match(/^DADOS(?: DA)? SOLICITACAO\s*(?:[-:#]\s*)?([1-9]\d{3,11})$/);
+    const pesq=line.trim().match(/^DADOS DA PESQUISA\s*(?:[-:#]\s*)?([1-9]\d{3,11})$/);
+    if(sol)titles.push(`Dados Solicitação ${sol[1]}`);
+    if(pesq)titles.push(`Dados da Pesquisa - ${pesq[1]}`);
+  }
+  const fields=new Map<string,string[]>();
+  for(const row of document.querySelectorAll('.row')){
+    const cells=Array.from(row.children).filter(node=>node.matches('.cell,td'));
+    for(let i=0;i<cells.length-1;i++){
+      const label=norm(cells[i].textContent??'');
+      if(!label.endsWith(':'))continue;
+      const values=fields.get(label)??[];
+      values.push(((cells[i+1] as HTMLElement).innerText??cells[i+1].textContent??'').trim());
+      fields.set(label,values);
+    }
+  }
+  const unique=(label:string)=>{const values=fields.get(label);return values?.length===1?values[0]:'';};
+  let cpfText=unique('CPF:'),pesquisaType=unique('PESQUISA:');
+  if(!cpfText&&!fields.has('CPF:')){
+    const matches=[...visibleText.matchAll(/\bCPF\s*:\s*(\d{3}\.\d{3}\.\d{3}-\d{2})\b/g)];
+    if(matches.length===1)cpfText=matches[0][1];
+  }
+  if(!pesquisaType&&/\bPESQUISA\s*:\s*PROCESSOS JUDICIAIS CRIMINAL FORUM NACIONAL CPF\b/.test(visibleText))pesquisaType='PROCESSOS JUDICIAIS CRIMINAL FORUM NACIONAL CPF';
+  const selected=Array.from(document.querySelectorAll('select')).map(el=>el.selectedOptions[0]?.textContent?.trim()??'')
+    .find(text=>/aguardando pesquisa|respondida/i.test(text));
+  const signals=[...visibleText.matchAll(/ERRO DE SERVIDOR NO APLICATIVO|NAO E POSSIVEL ENCONTRAR O RECURSO|SERVER ERROR IN/g)].map(match=>match[0]);
+  if(/404;404;|HTTP\s*404|\b404\b/.test(visibleText))signals.push('404;404;');
+  if(/URL SOLICITADA\s*:\s*\/?CPI_API_REQUEST\.ASPX\b/.test(visibleText))signals.push('URL SOLICITADA: /CPI_API_REQUEST.ASPX');
+  return {titles,cpfText,pesquisaType,status:selected??unique('STATUS:'),savedStatus:unique('STATUS:'),
+    savedResult:unique('RESULTADO:'),savedSource:unique('PESQUISADOR/FONTE:'),responseTimestamp:unique('RESPONDIDA EM:'),pdfDocument:unique('EM ARQUIVO:'),
+    editableUploadPresent:!!document.querySelector('input[type="file"]'),errorSignals:signals.join(' '),
+    businessErrorVisible:/(?:ERRO|FALHA)\s+(?:AO|NO SALVAMENTO)|NAO FOI POSSIVEL|NAO AUTORIZADO|DADOS INVALIDOS/.test(norm(visibleText))};
+}
+
+export function matchesCpiDetailHeadings(ids:CpiPendingRowId,headings:Pick<CpiRawPersonDetails,'solicitacaoHeading'|'pesquisaHeading'>):boolean {
+  return parseCpiDetailHeadingId(headings.solicitacaoHeading,'solicitacao')===ids.solicitacaoId &&
+    parseCpiDetailHeadingId(headings.pesquisaHeading,'pesquisa')===ids.pesquisaId;
+}
+
 /**
  * Aceita apenas variantes textuais dos titulos da CPI, nunca IDs parciais.
  * Ex.: "Dados Solicitação 123456" e "Dados da Solicitação: 123456".
