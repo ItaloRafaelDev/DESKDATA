@@ -18,6 +18,19 @@ export interface QueryRecord {
   lastIssue?: string;
 }
 type Kind='person'|'pis'|'company';
+export interface QueryRecordIdentity {
+  account:string;
+  kind:Kind;
+  document:string;
+  queryCode?:string;
+}
+export function assertQueryRecordIdentity(record:QueryRecord,identity:QueryRecordIdentity):void {
+  if(record.account!==identity.account || (record.kind??'person')!==identity.kind ||
+    (identity.kind==='company'?record.cnpj:record.cpf)!==identity.document ||
+    record.queryCode!==identity.queryCode){
+    throw new Error('A identidade da resposta ou do PDF não corresponde ao histórico da consulta.');
+  }
+}
 type SqlRow={id:string;payload:Uint8Array};
 const statuses=new Set(['uncertain','pending','paused','ready','pis_unavailable']);
 function validate(record:unknown):QueryRecord {
@@ -111,10 +124,11 @@ export class QueryHistoryStore {
       await this.mutation;
       if(this.initializing)await this.initializing.catch(()=>{});
       const db=this.db;
+      // Só descartar handle e chave após sucesso; uma falha permite tentar fechar de novo.
+      db?.close();
       this.db=undefined;
-      try{db?.close();}
-      finally{this.key?.fill(0);this.key=undefined;}
-    })();
+      this.key?.fill(0);this.key=undefined;
+    })().catch(error=>{this.closing=undefined;throw error;});
     return this.closing;
   }
   private async encrypt(record:QueryRecord):Promise<Buffer>{return this.protector.encrypt(JSON.stringify(validate(record)));}
@@ -205,9 +219,13 @@ export class QueryHistoryStore {
     if(!/^Q-[A-F0-9]{10}$/.test(queryCode))throw Error('Código de consulta inválido.');
     await this.update(id,row=>{row.queryCode=queryCode;row.status='pending';delete row.lastIssue;row.updatedAt=new Date().toISOString();});
   }
-  async addPdf(id:string,path:string):Promise<void>{
+  async addPdf(id:string,path:string,identity?:QueryRecordIdentity):Promise<void>{
     if(typeof path!=='string'||!path.toLowerCase().endsWith('.pdf'))throw Error('Caminho PDF inválido.');
-    await this.update(id,row=>{if(!row.pdfPaths.includes(path))row.pdfPaths.push(path);row.status='ready';delete row.lastIssue;row.updatedAt=new Date().toISOString();});
+    await this.update(id,row=>{
+      if(identity)assertQueryRecordIdentity(row,identity);
+      if(!row.pdfPaths.includes(path))row.pdfPaths.push(path);
+      row.status='ready';delete row.lastIssue;row.updatedAt=new Date().toISOString();
+    });
   }
   async markPisUnavailable(id:string):Promise<void>{await this.update(id,row=>{
     if(row.kind!=='pis'||row.pdfPaths.length)throw Error('Registro PIS inválido para indisponibilidade.');

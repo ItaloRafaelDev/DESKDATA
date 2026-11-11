@@ -21,37 +21,45 @@ import { cnpjDigits, isValidCnpj } from '../shared/cnpj.ts';
 import { assertRecoveredCnpj } from '../shared/company-identity.ts';
 import { normalizeCompanyResponse } from '../shared/company-report.ts';
 import { isValidCpf, cpfDigits } from '../shared/cpf.ts';
-import { normalizeDeskdataResponse } from '../shared/normalizer.ts';
 import { assertRecoveredCpf } from '../shared/query-identity.ts';
-import { QueryRecovery, type ReceivedQuery } from '../shared/query-recovery.ts';
-import type { ReportPayload, QueryOutcome, QueryExecution, QueryUpdate, PisQueryExecution } from '../shared/types.ts';
+import { PersonReportService, type ReceivedPersonQuery } from './person-reports.ts';
+import type { QueryOutcome, QueryExecution, QueryUpdate, PisQueryExecution } from '../shared/types.ts';
 import { DeskdataClient } from './deskdata-client.ts';
 import { chooseFolder, getSettings } from './settings.ts';
 import { saveCompanyReportPdf, saveReportPdf, savePisReportPdf } from './pdf.ts';
 import { resolvePisOutcome } from './pis-outcome.ts';
 import { CredentialStore } from './credentials.ts';
 import { AccountApprovalStore } from './account-approval.ts';
-import { QueryHistoryStore, type QueryRecord } from './query-history.ts';
+import { QueryHistoryStore, assertQueryRecordIdentity, type QueryRecord } from './query-history.ts';
 import { PendingQueryMonitor, type PendingTarget } from './pending-queries.ts';
 import { MaintenanceService } from './maintenance.ts';
+import { ApplicationOperations, settleWithin } from './operations.ts';
 import type { MaintenanceSelection, MaintenanceResult } from '../shared/types.ts';
 
 const client=new DeskdataClient();
+const operations=new ApplicationOperations();
+// A reserva acontece no wrapper IPC antes de invocar qualquer função assíncrona.
+const exclusiveChannels=new Set([
+  'api:query','pis:query','company:query','queries:resume','history:recover-code',
+  'history:regenerate','pis:regenerate','company:regenerate','report:reprocess','report:save-again',
+  'maintenance:clean','backup:create','auth:login','auth:logout','settings:choose-folder',
+  'cpi:open','cpi:inspect','cpi:filter-person-29','cpi:rows:inspect','cpi:details:inspect',
+  'cpi:person:history','cpi:person:prepare'
+]);
 const cpiBrowser=new CpiBrowser();
 const cpiMonitor=new CpiPendingMonitor(
-  () => cpiBrowser.filterPendingPerson29(),
+  () => operations.run(()=>cpiBrowser.filterPendingPerson29(),true),
   snapshot => {
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
       mainWindow.webContents.send('cpi:monitor:updated', snapshot);
     }
   }
 );
-const queryRecovery = new QueryRecovery();
 let mainWindow:BrowserWindow;
 let busy=false;
-let lastReport:ReportPayload|null=null;
 let lastSavedPdf:string|null=null;
 let history:QueryHistoryStore;
+let personReports:PersonReportService;
 let monitor:PendingQueryMonitor;
 let maintenance:MaintenanceService;
 let backups:BackupService;
@@ -63,7 +71,6 @@ let cpiWorkflow:CpiWorkflowStore;
 let cpiAuto:CpiFullAutoRunner;
 const activeCompletions=new Set<Promise<void>>();
 let sessionAccount:string|null=null;
-let lastRecordId:string|null=null;
 let lastCompanyResponse:{cnpj:string;payload:unknown;queryCode?:string}|null=null;
 let lastPisResponse:{cpf:string;payload:unknown;queryCode?:string}|null=null;
 
@@ -109,8 +116,12 @@ async function cpiScanOne():Promise<{found:number;outcomes:import('./cpi/full-cy
       submitCpf:(cpf,onCode)=>client.submitCpf(cpf,onCode),
       fetchByCode:code=>client.fetchByCode(code),
       savePdf:async(cpf,recordId,code,data)=>{
+        const identity={account:who,kind:'person' as const,document:cpf,queryCode:code};
+        const record=await history.findById(who,recordId);
+        if(!record)throw new Error('Registro CPI indisponível no histórico desta conta.');
+        assertQueryRecordIdentity(record,identity);
         const outcome=await saveReportPdf(settings.outputFolder!,{cpf,consultedAt:new Date().toISOString(),queryCode:code,data});
-        await history.addPdf(recordId,outcome.path);
+        await history.addPdf(recordId,outcome.path,identity);
         showHistoryChange({kind:'person',recordId,state:'ready'});
       },
       uploadAndSave:async(pdf,result)=>{
@@ -132,7 +143,7 @@ function bind<T extends unknown[]>(channel:string,operation:(...args:T)=>Promise
     guard(event);
     const began=performance.now();
     try {
-      const result=await operation(...(args as T));
+      const result=await operations.run(()=>operation(...(args as T)),exclusiveChannels.has(channel));
       void diagnostics?.write('ipc_success',{channel,durationMs:performance.now()-began}).catch(()=>{});
       return result;
     } catch(error){
@@ -146,26 +157,19 @@ async function approvedForCurrentAccount():Promise<boolean> {return approvals.is
 async function viewSettings(){const settings=await getSettings();return {...settings,paidQueriesApproved:sessionAccount && !sessionTransitionActive?await approvals.isApproved(sessionAccount):false};}
 async function assertPaidQueryApproved(){if(!await approvedForCurrentAccount())throw new Error('Autorize novas consultas para esta conta em Minha conta.');}
 function toError(e:unknown):Error { return e instanceof Error?e:new Error('Ocorreu um erro não identificado.'); }
-async function exportReport(report:ReportPayload,recordId:string|null=lastRecordId):Promise<QueryOutcome>{
-  const {outputFolder}=await getSettings();
-  if(!outputFolder)throw new Error('Selecione antes a pasta de destino dos PDFs.');
-  const result=await saveReportPdf(outputFolder,report);
+async function processReceived(received:ReceivedPersonQuery):Promise<QueryOutcome>{
+  const result=await personReports.processReceived(received);
   lastSavedPdf=result.path;
-  if(recordId)await history.addPdf(recordId,result.path);
-  return {...result,recordId:recordId??undefined};
-}
-async function processReceived(result: ReceivedQuery,recordId:string): Promise<QueryOutcome> {
-  lastRecordId=recordId;
-  const data = normalizeDeskdataResponse(result.payload);
-  lastReport = {cpf: result.cpf, consultedAt: result.consultedAt, queryCode: result.queryCode, data};
-  return exportReport(lastReport,recordId);
+  return result;
 }
 async function reprocessLastResponse(): Promise<QueryOutcome> {
   if (busy) throw new Error('Já existe uma operação em execução.');
-  const cached = queryRecovery.read();
-  if (!cached) throw new Error('Nenhuma resposta de consulta está disponível nesta sessão.');
   busy = true;
-  try {if(!lastRecordId)throw new Error('Registro local indisponível para reprocessamento.');return await processReceived(cached,lastRecordId); } finally { busy = false; }
+  try {
+    const result=await personReports.reprocessLastResponse();
+    lastSavedPdf=result.path;
+    return result;
+  } finally { busy = false; }
 }
 async function validateStoredPdf(path:string):Promise<boolean>{
   if(extname(path).toLowerCase()!=='.pdf')return false;
@@ -185,7 +189,7 @@ async function pending(record:QueryRecord,immediate=false):Promise<QueryExecutio
   if(!record.queryCode)throw new Error('Consulta sem código para recuperação automática.');
   if(!monitor.isWatching(record.id)){
     await history.setPending(record.id);
-    monitor.watch(targetFrom(record),immediate);
+    if(!shutdownRequested)monitor.watch(targetFrom(record),immediate);
   }
   return {state:'pending',recordId:record.id,queryCode:record.queryCode};
 }
@@ -199,9 +203,8 @@ async function resolveRecorded(record:QueryRecord):Promise<QueryExecution>{
     return ready({...await exportCompany(record.cnpj,received.payload,record.id,record.queryCode),reused:true});
   }
   assertRecoveredCpf(received.payload,record.cpf);
-  const result:ReceivedQuery={cpf:record.cpf,consultedAt:new Date().toISOString(),queryCode:record.queryCode,payload:received.payload};
-  queryRecovery.remember(result);
-  return ready({...await processReceived(result,record.id),reused:true});
+  const result:ReceivedPersonQuery={account:record.account,recordId:record.id,cpf:record.cpf,consultedAt:new Date().toISOString(),queryCode:record.queryCode,payload:received.payload};
+  return ready({...await processReceived(result),reused:true});
 }
 async function completePending(target:PendingTarget,payload:unknown):Promise<void>{
   const work=(async()=>{
@@ -216,9 +219,8 @@ async function completePending(target:PendingTarget,payload:unknown):Promise<voi
   }else{
     if(!target.cpf)throw new Error('CPF ausente do histórico de consulta.');
     assertRecoveredCpf(payload,target.cpf);
-    const received:ReceivedQuery={cpf:target.cpf,consultedAt:new Date().toISOString(),queryCode:target.queryCode,payload};
-    queryRecovery.remember(received);
-    await processReceived(received,target.id);
+    const received:ReceivedPersonQuery={account:target.account,recordId:target.id,cpf:target.cpf,consultedAt:new Date().toISOString(),queryCode:target.queryCode,payload};
+    await processReceived(received);
   }
   showHistoryChange({kind:target.kind,recordId:target.id,state:'ready'});
   })();
@@ -228,7 +230,7 @@ async function completePending(target:PendingTarget,payload:unknown):Promise<voi
 async function resumeAfterAuthentication(who:string):Promise<void>{
   for(const kind of ['person','company'] as const){
     for(const row of await history.list(who,kind)){
-      if(row.status==='pending' && row.queryCode)monitor.watch(targetFrom(row),true);
+      if(!shutdownRequested && row.status==='pending' && row.queryCode)monitor.watch(targetFrom(row),true);
     }
   }
 }
@@ -257,14 +259,12 @@ async function queryAndSave(rawCpf:string):Promise<QueryExecution>{
       const validPaths=[];
       for(const file of [...previous.pdfPaths].reverse())if(await validateStoredPdf(file))validPaths.push(file);
       if(validPaths.length){
-        lastReport=null;lastSavedPdf=validPaths[0];lastRecordId=previous.id;
+        personReports.clearReport();lastSavedPdf=validPaths[0];
         return ready({path:validPaths[0],savedAt:previous.updatedAt,queryCode:previous.queryCode,recordId:previous.id,reused:true});
       }
       if(!previous.queryCode){
-        if(queryRecovery.matches(cpf)){
-          const cached=queryRecovery.read();
-          if(cached)return ready(await processReceived(cached,previous.id));
-        }
+        const cached=personReports.readFor(who,cpf,previous.id);
+        if(cached)return ready(await processReceived(cached));
         throw new Error('Existe uma consulta anterior deste CPF sem PDF disponível nem código recuperável. Nenhum novo POST foi enviado. Verifique o histórico antes de autorizar outra consulta.');
       }
       return resolveRecorded(previous);
@@ -274,13 +274,10 @@ async function queryAndSave(rawCpf:string):Promise<QueryExecution>{
     if(credits<=0)throw new Error('Saldo de créditos indisponível ou zerado.');
     // Registro cifrado ANTES do POST. Se a conexão cair, não repetimos uma operação potencialmente cobrada.
     const record=await history.begin(who,cpf);
-    lastRecordId=record.id;
     const outcome=await client.submitCpf(cpf,code=>history.setCode(record.id,code));
     if(outcome.state==='pending')return pending({...record,queryCode:outcome.queryCode});
-    const received:ReceivedQuery={cpf,consultedAt:new Date().toISOString(),queryCode:outcome.queryCode,payload:outcome.payload};
-    queryRecovery.remember(received);
-    lastReport=null;
-    return ready(await processReceived(received,record.id));
+    const received:ReceivedPersonQuery={account:who,recordId:record.id,cpf,consultedAt:new Date().toISOString(),queryCode:outcome.queryCode,payload:outcome.payload};
+    return ready(await processReceived(received));
   }finally{busy=false;}
 }
 async function regenerateHistory(recordId:string):Promise<QueryExecution>{
@@ -426,9 +423,12 @@ async function regenerateCompany(recordId:string):Promise<QueryExecution>{
 }
 async function saveAgain():Promise<QueryOutcome>{
   if(busy)throw new Error('Aguarde o término da operação atual.');
-  if(!lastReport)throw new Error('Não há relatório disponível para novo salvamento nesta sessão.');
   busy=true;
-  try{return await exportReport(lastReport);}finally{busy=false;}
+  try{
+    const result=await personReports.saveAgain();
+    lastSavedPdf=result.path;
+    return result;
+  }finally{busy=false;}
 }
 function createMainWindow():void{
   mainWindow=new BrowserWindow({
@@ -436,6 +436,9 @@ function createMainWindow():void{
     webPreferences:{preload:join(currentDir,'../preload/index.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false,webSecurity:true}
   });
   mainWindow.once('ready-to-show',()=>mainWindow.show());
+  mainWindow.on('close',event=>{
+    if(!shutdownReady){event.preventDefault();app.quit();}
+  });
   mainWindow.webContents.setWindowOpenHandler(()=>({action:'deny'}));
   mainWindow.webContents.on('will-navigate',e=>e.preventDefault());
   if(!app.isPackaged && process.env.ELECTRON_RENDERER_URL){
@@ -462,22 +465,26 @@ if(instanceLock)app.whenReady().then(()=>{
   void diagnostics.write('app_started',{state:'success'}).catch(()=>{});
   const credentials = new CredentialStore(dataDir,protector);
   history = new QueryHistoryStore(dataDir,protector);
+  personReports = new PersonReportService({history,
+    currentAccount:()=>sessionTransitionActive?null:sessionAccount,
+    getOutputFolder:async()=>(await getSettings()).outputFolder,
+    savePdf:saveReportPdf});
   approvals = new AccountApprovalStore(dataDir,protector);
   cpiWorkflow = new CpiWorkflowStore(dataDir,protector);
-  cpiAuto = new CpiFullAutoRunner(cpiScanOne,snapshot=>{
+  cpiAuto = new CpiFullAutoRunner(()=>operations.run(cpiScanOne,true),snapshot=>{
     if(mainWindow&&!mainWindow.isDestroyed()&&!mainWindow.webContents.isDestroyed())
       mainWindow.webContents.send('cpi:auto:updated',snapshot);
   });
   maintenance = new MaintenanceService(history);
   backups=new BackupService({userData:dataDir,backupDirectory:app.isPackaged?join(dataDir,'backups'):join(app.getAppPath(),'backups'),history,protector,getSettings});
   monitor = new PendingQueryMonitor({
-    get:code=>client.checkByCode(code),
-    complete:completePending,
-    pause:async(target,message)=>{
+    get:code=>operations.run(()=>client.checkByCode(code)),
+    complete:(target,payload)=>operations.run(()=>completePending(target,payload)),
+    pause:(target,message)=>operations.run(async()=>{
       if(sessionAccount!==target.account)return;
       await history.setPaused(target.id,message);
       showHistoryChange({kind:target.kind,recordId:target.id,state:'paused',message});
-    }
+    })
   });
   session.defaultSession.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));
   bind('settings:get',()=>viewSettings());
@@ -511,31 +518,37 @@ if(instanceLock)app.whenReady().then(()=>{
   bind<[MaintenanceSelection]>('maintenance:clean',async(selection):Promise<MaintenanceResult>=>{
     account();
     if(maintenanceActive||busy)throw new Error('Conclua a operação atual antes da limpeza.');
+    if(cpiAuto.isActive()||cpiMonitor.isActive())throw new Error('Pause a automação CPI antes de executar a limpeza.');
     if(!selection||typeof selection.pdfs!=='boolean'||typeof selection.history!=='boolean'||(!selection.pdfs&&!selection.history))throw new Error('Selecione os dados a limpar.');
-    const summary=await maintenance.preview();
-    const explanation=[
-      selection.pdfs?`${summary.pdfCount} PDF(s) cadastrados no histórico desta instalação serão removidos, quando existentes.`:'Os PDFs permanecerão no disco.',
-      selection.history?`${summary.recordCount} registro(s) locais de todas as contas serão apagados, incluindo códigos de recuperação.`:'Os códigos de consulta e o histórico serão mantidos.',
-      summary.pendingCount?`Existem ${summary.pendingCount} consulta(s) pendentes ou incertas no histórico.`:'',
-      'A exclusão não remove consultas da Deskdata e não pode ser desfeita pelo aplicativo.'
-    ].filter(Boolean).join('\n\n');
-    const answer=await dialog.showMessageBox(mainWindow,{
-      type:'warning',title:'Confirmar limpeza local',message:'Deseja excluir os dados selecionados?',detail:explanation,
-      buttons:['Cancelar','Excluir definitivamente'],defaultId:0,cancelId:0,noLink:true
-    });
-    if(answer.response!==1)return {cancelled:true,deletedPdfs:0,missingPdfs:0,deletedRecords:0};
     maintenanceActive=true;
     busy=true;
     monitor.stopAll();
     try{
-      // Uma recuperação já iniciada deve concluir antes de começar a excluir arquivos.
+      // Concluir recuperações aceitas antes de apresentar o resumo ou excluir arquivos.
       await Promise.allSettled([...activeCompletions]);
+      const summary=await maintenance.preview();
+      const explanation=[
+        selection.pdfs?`${summary.pdfCount} PDF(s) cadastrados no histórico desta instalação serão removidos, quando existentes.`:'Os PDFs permanecerão no disco.',
+        selection.history?`${summary.recordCount} registro(s) locais de todas as contas serão apagados, incluindo códigos de recuperação.`:'Os códigos de consulta e o histórico serão mantidos.',
+        summary.pendingCount?`Existem ${summary.pendingCount} consulta(s) pendentes ou incertas no histórico.`:'',
+        'A exclusão não remove consultas da Deskdata e não pode ser desfeita pelo aplicativo.'
+      ].filter(Boolean).join('\n\n');
+      const answer=await dialog.showMessageBox(mainWindow,{
+        type:'warning',title:'Confirmar limpeza local',message:'Deseja excluir os dados selecionados?',detail:explanation,
+        buttons:['Cancelar','Excluir definitivamente'],defaultId:0,cancelId:0,noLink:true
+      });
+      operations.assertAccepting();
+      account();
+      if(cpiAuto.isActive()||cpiMonitor.isActive())throw new Error('Pause a automação CPI antes de executar a limpeza.');
+      if(answer.response!==1)return {cancelled:true,deletedPdfs:0,missingPdfs:0,deletedRecords:0};
       const result=await maintenance.clean(selection);
-      queryRecovery.clear();lastReport=null;lastRecordId=null;lastSavedPdf=null;
+      personReports.clear();lastSavedPdf=null;
       lastCompanyResponse=null;lastPisResponse=null;
-      if(!selection.history && sessionAccount)await resumeAfterAuthentication(sessionAccount);
       return {...result,cancelled:false};
-    }finally{maintenanceActive=false;busy=false;}
+    }finally{
+      maintenanceActive=false;busy=false;
+      if(!shutdownRequested && sessionAccount)await resumeAfterAuthentication(sessionAccount);
+    }
   });
   bind('cpi:history:list',async()=>{
     const who=account();
@@ -576,9 +589,12 @@ if(instanceLock)app.whenReady().then(()=>{
   bind('cpi:auto:status',async()=>{account();return cpiAuto.status();});
   bind<[number]>('cpi:auto:start',async seconds=>{
     account();
-    if(cpiMonitor.isActive()||busy||maintenanceActive)throw new Error('Pause o monitor e outras operações antes de iniciar FULL AUTO.');
+    if(cpiMonitor.isActive()||busy||maintenanceActive||operations.isExclusive())throw new Error('Pause o monitor e conclua a operação atual antes de iniciar FULL AUTO.');
     if(cpiBrowser.status().state!=='open')throw new Error('Autentique-se na CPI pelo Edge antes de iniciar.');
     if(!await approvals.isApproved(account()))throw new Error('Autorize consultas Deskdata para a conta em Minha conta.');
+    operations.assertAccepting();
+    account();
+    if(cpiMonitor.isActive()||busy||maintenanceActive||operations.isExclusive())throw new Error('Conclua a operação atual antes de iniciar FULL AUTO.');
     return cpiAuto.start(seconds);
   });
   bind('cpi:auto:pause',async()=>{account();return cpiAuto.pause();});
@@ -626,7 +642,7 @@ if(instanceLock)app.whenReady().then(()=>{
       return prepared;
     } finally { busy=false; }
   });
-  bind<[number]>('cpi:monitor:start',async(intervalSeconds)=>{account();if(cpiAuto.isActive())throw new Error('Pause o ciclo FULL AUTO primeiro.');if(cpiBrowser.status().state!=='open')throw new Error('Abra o Edge e autentique na CPI antes de iniciar o monitor.');return cpiMonitor.start(intervalSeconds);});
+  bind<[number]>('cpi:monitor:start',async(intervalSeconds)=>{account();if(operations.isExclusive())throw new Error('Conclua a operação atual antes de iniciar o monitor.');if(cpiAuto.isActive())throw new Error('Pause o ciclo FULL AUTO primeiro.');if(cpiBrowser.status().state!=='open')throw new Error('Abra o Edge e autentique na CPI antes de iniciar o monitor.');return cpiMonitor.start(intervalSeconds);});
   bind('cpi:monitor:pause',async()=>{account();return cpiMonitor.pause();});
   bind('cpi:monitor:status',async()=>{account();return cpiMonitor.status();});
   bind('cpi:close',async()=>{account();await cpiAuto.pause();await cpiMonitor.stopAndWait();await cpiBrowser.close();});
@@ -662,7 +678,7 @@ if(instanceLock)app.whenReady().then(()=>{
       await cpiAuto.pause();
       await cpiMonitor.stopAndWait();
       await cpiBrowser.close();
-      client.reset();sessionAccount=null;lastCompanyResponse=null;lastReport=null;lastRecordId=null;lastSavedPdf=null;lastPisResponse=null;queryRecovery.clear();
+      client.reset();sessionAccount=null;lastCompanyResponse=null;lastSavedPdf=null;lastPisResponse=null;personReports.clear();
     }finally{sessionTransitionActive=false;}
   });
   bind('api:credits',()=>client.credits());
@@ -686,7 +702,7 @@ if(instanceLock)app.whenReady().then(()=>{
     if(result)throw new Error('O leitor padrão do Windows não conseguiu abrir este PDF.');
   });
   bind('report:reprocess',reprocessLastResponse);
-  bind('report:recovery-status',async()=>({hasResponse:queryRecovery.exists(),hasReport:lastReport!==null}));
+  bind('report:recovery-status',async()=>personReports.status());
   bind('report:open-pdf',async()=>{
     if(!lastSavedPdf||extname(lastSavedPdf).toLowerCase()!=='.pdf')throw new Error('Não há PDF gerado nesta sessão.');
     const pdfFile=lastSavedPdf;
@@ -712,19 +728,34 @@ app.on('before-quit',event=>{
   event.preventDefault();
   if(shutdownRequested)return;
   shutdownRequested=true;
+  operations.stopAccepting();
   monitor?.stopAll();
+  // Interromper novos agendamentos agora, preservando o ciclo e a sessão em curso.
+  const stopping=[cpiAuto?.pause(),cpiMonitor.stopAndWait()];
+  const started=performance.now();
+  let databaseCloseStarted=false;
   void (async()=>{
+    if(!await operations.waitForIdle(stopping))throw new Error('ShutdownTimeoutError');
     await Promise.allSettled([...activeCompletions]);
-    await cpiAuto.pause();
-    await cpiMonitor.stopAndWait();
-    await cpiBrowser.close();
+    if(!await settleWithin(cpiBrowser.close(),60_000-(performance.now()-started)))throw new Error('ShutdownTimeoutError');
+    databaseCloseStarted=true;
     await history?.close();
+    client.reset();sessionAccount=null;personReports?.clear();
+    shutdownReady=true;
+    app.quit();
   })().catch(error=>{
     // Não registrar payloads, tokens ou identificadores nos diagnósticos.
     console.error('Falha ao encerrar o histórico SQLite:',toError(error).name);
-  }).finally(()=>{
-    shutdownReady=true;
-    app.quit();
+    shutdownRequested=false;
+    if(!databaseCloseStarted)operations.resumeAccepting();
+    if(mainWindow&&!mainWindow.isDestroyed()){
+      void dialog.showMessageBox(mainWindow,{type:'warning',title:'Encerramento adiado',
+        message:'O aplicativo permanece aberto para preservar as operações e o histórico.',
+        detail:databaseCloseStarted
+          ? 'Não foi possível fechar o banco com segurança. Novas operações permanecem bloqueadas; tente sair novamente. O histórico e a sessão não foram descartados.'
+          : 'Uma operação não terminou com segurança dentro do prazo de encerramento ou houve falha ao liberar recursos. Aguarde antes de tentar sair novamente. Uma consulta paga ou resposta CPI pode ter resultado incerto: verifique o histórico e não repita o envio.',
+        buttons:['Entendido']}).catch(()=>{});
+    }
   });
 });
-app.on('window-all-closed',()=>{monitor?.stopAll();client.reset();sessionAccount=null;app.quit();});
+app.on('window-all-closed',()=>{app.quit();});
