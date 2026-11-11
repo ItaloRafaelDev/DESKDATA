@@ -16,6 +16,8 @@ export interface CpiWorkItem extends CpiPendingRowId {
   updatedAt: string;
 }
 type Stored = { version:1; items:CpiWorkItem[] };
+const MAX_WORK_ITEMS=10000;
+const CAPACITY_ERROR='Fila CPI atingiu o limite operacional de 10.000 registros; processamento bloqueado sem alterar o histórico.';
 const stages = new Set<CpiWorkStage>(['claimed','query_started','query_pending','pdf_ready','submit_started','completed','verification_required','review_required']);
 function valid(row:unknown):row is CpiWorkItem {
   if (!row || typeof row!=='object') return false;
@@ -27,6 +29,19 @@ function valid(row:unknown):row is CpiWorkItem {
     (r.reviewReason===undefined || JUDICIAL_ISSUE_CODES.includes(r.reviewReason));
 }
 function key(account:string,ids:CpiPendingRowId):string {return `${account.trim().toLowerCase()}|${ids.solicitacaoId}|${ids.pesquisaId}`;}
+function validStored(value:unknown):value is Stored {
+  if(!value||typeof value!=='object'||Array.isArray(value))return false;
+  const data=value as Partial<Stored>;
+  if(data.version!==1||!Array.isArray(data.items))return false;
+  const seen=new Set<string>();
+  for(const row of data.items){
+    if(!valid(row))return false;
+    const id=key(row.account,row);
+    if(seen.has(id))return false;
+    seen.add(id);
+  }
+  return true;
+}
 export class CpiWorkflowStore {
   private queue:Promise<void>=Promise.resolve();
   private readonly path:string;
@@ -40,17 +55,16 @@ export class CpiWorkflowStore {
       throw new Error('Fila CPI indisponível; processamento bloqueado.');
     }
     if(!await this.protector.isAvailable())throw new Error('Proteção Windows indisponível; fila CPI bloqueada.');
-    try {
-      const parsed:unknown=JSON.parse((await this.protector.decrypt(cipher)).result);
-      if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw Error('Invalid');
-      const data=parsed as Stored;
-      if(data.version!==1||!Array.isArray(data.items)||data.items.length>10000||!data.items.every(valid))throw Error('Invalid');
-      const seen=new Set<string>();
-      for(const row of data.items){const k=key(row.account,row);if(seen.has(k))throw Error('Duplicate');seen.add(k);}
-      return data;
-    } catch {throw new Error('Fila CPI corrompida; processamento bloqueado para evitar duplicação.');}
+    let parsed:unknown;
+    try {parsed=JSON.parse((await this.protector.decrypt(cipher)).result);}
+    catch {throw new Error('Fila CPI corrompida; processamento bloqueado para evitar duplicação.');}
+    if(!validStored(parsed))throw new Error('Fila CPI corrompida; processamento bloqueado para evitar duplicação.');
+    if(parsed.items.length>MAX_WORK_ITEMS)throw new Error(CAPACITY_ERROR);
+    return parsed;
   }
   private async write(data:Stored):Promise<void>{
+    if(!validStored(data))throw new Error('Tentativa de persistir fila CPI inválida.');
+    if(data.items.length>MAX_WORK_ITEMS)throw new Error(CAPACITY_ERROR);
     if(!await this.protector.isAvailable())throw new Error('Proteção Windows indisponível; fila CPI bloqueada.');
     const cipher=await this.protector.encrypt(JSON.stringify(data));
     await mkdir(this.directory,{recursive:true});

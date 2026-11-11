@@ -26,10 +26,12 @@ test('CPI: consulta pendente ou CPF diferente bloqueia anexo',()=>withTemp(async
  await assert.rejects(findCpiPersonPdf(record([path],{status:'pending'}),cpf,root),/não está pronta/);
  await assert.rejects(findCpiPersonPdf(record([path],{cpf:'11144477735'}),cpf,root),/não está pronta/);
 }));
-test('CPI: rejeita documentos fora da pasta configurada, inclusive via symlink',()=>withTemp(async root=>{
+test('CPI: rejeita documentos fora da pasta configurada, inclusive via link de diretório',()=>withTemp(async root=>{
  const inFolder=join(root,'out');await mkdir(inFolder);
- const outside=join(root,`RELATORIO_${cpf}_2026-11-04.pdf`);await writeFile(outside,pdfData);
+ const outsideFolder=join(root,'outside');await mkdir(outsideFolder);
+ const outside=join(outsideFolder,`RELATORIO_${cpf}_2026-11-04.pdf`);await writeFile(outside,pdfData);
  await assert.rejects(findCpiPersonPdf(record([outside]),cpf,inFolder),/PDF correspondente/);
- const linked=join(inFolder,`RELATORIO_${cpf}_2026-11-04.pdf`);await symlink(outside,linked);
+ const link=join(inFolder,'linked');await symlink(outsideFolder,link,process.platform==='win32'?'junction':'dir');
+ const linked=join(link,`RELATORIO_${cpf}_2026-11-04.pdf`);
  await assert.rejects(findCpiPersonPdf(record([linked]),cpf,inFolder),/PDF correspondente/);
 }));
