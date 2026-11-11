@@ -4,6 +4,7 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { QueryHistoryStore } from '../src/main/query-history.ts';
+import { DatabaseSync } from 'node:sqlite';
 
 const protector = {
   isAvailable: async () => true,
@@ -38,5 +39,26 @@ test('encerramento aguarda gravações em andamento e preserva histórico ao rea
   } finally {
     await Promise.all([first.close(), second.close()]);
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('falha ao fechar SQLite mantém acesso bloqueado mas permite repetir o fechamento', async t => {
+  const directory=await mkdtemp(join(tmpdir(),'deskdata-close-retry-'));
+  const store=new QueryHistoryStore(directory,protector);
+  const close=DatabaseSync.prototype.close;
+  let fail=true;
+  try{
+    await store.begin('teste@example.org','52998224725');
+    t.mock.method(DatabaseSync.prototype,'close',function(){
+      if(fail){fail=false;throw new Error('Fechamento simulado indisponível');}
+      return close.call(this);
+    });
+    await assert.rejects(store.close(),/Fechamento simulado/);
+    await assert.rejects(store.list('teste@example.org'),/encerrado/);
+    await store.close();
+  }finally{
+    t.mock.restoreAll();
+    await store.close();
+    await rm(directory,{recursive:true,force:true});
   }
 });

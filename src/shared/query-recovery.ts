@@ -6,11 +6,11 @@ export interface ReceivedQuery {
   payload: unknown;
 }
 
-export class QueryRecovery {
-  private value: ReceivedQuery | null = null;
-  remember(result: ReceivedQuery): void { this.value = result; }
+export class QueryRecovery<T extends ReceivedQuery = ReceivedQuery> {
+  private value: T | null = null;
+  remember(result: T): void { this.value = result; }
   exists(): boolean { return this.value !== null; }
   matches(cpf: string): boolean { return this.value?.cpf === cpf; }
-  read(): ReceivedQuery | null { return this.value; }
+  read(): T | null { return this.value; }
   clear(): void { this.value = null; }
 }
