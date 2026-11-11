@@ -2,6 +2,16 @@ import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, session, type 
 import { stat } from 'node:fs/promises';
 import { mkdirSync } from 'node:fs';
 import { BackupService } from './backup.ts';
+import { CpiBrowser } from './cpi/cpi-browser.ts';
+import { CpiPendingMonitor } from './cpi/pending-monitor.ts';
+import { inspectCpiPersonHistory } from './cpi/person-history.ts';
+import { prepareCpiPersonPdf } from './cpi/person-recovery.ts';
+import { assertCpiPaidBalance } from './cpi/paid-balance.ts';
+import { validateCpiRowId } from './cpi/pending-rows.ts';
+import { CpiWorkflowStore } from './cpi/workflow-store.ts';
+import { CpiFullAutoRunner } from './cpi/full-auto-runner.ts';
+import { executeCpiPersonCycle } from './cpi/full-cycle.ts';
+import type { CpiPendingRowId } from '../shared/types.ts';
 import { DiagnosticLogger } from './diagnostics.ts';
 import { extname } from 'node:path';
 import { join, dirname } from 'node:path';
@@ -27,6 +37,15 @@ import { MaintenanceService } from './maintenance.ts';
 import type { MaintenanceSelection, MaintenanceResult } from '../shared/types.ts';
 
 const client=new DeskdataClient();
+const cpiBrowser=new CpiBrowser();
+const cpiMonitor=new CpiPendingMonitor(
+  () => cpiBrowser.filterPendingPerson29(),
+  snapshot => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('cpi:monitor:updated', snapshot);
+    }
+  }
+);
 const queryRecovery = new QueryRecovery();
 let mainWindow:BrowserWindow;
 let busy=false;
@@ -40,11 +59,70 @@ let diagnostics:DiagnosticLogger;
 let maintenanceActive=false;
 let sessionTransitionActive=false;
 let approvals:AccountApprovalStore;
+let cpiWorkflow:CpiWorkflowStore;
+let cpiAuto:CpiFullAutoRunner;
 const activeCompletions=new Set<Promise<void>>();
 let sessionAccount:string|null=null;
 let lastRecordId:string|null=null;
 let lastCompanyResponse:{cnpj:string;payload:unknown;queryCode?:string}|null=null;
 let lastPisResponse:{cpf:string;payload:unknown;queryCode?:string}|null=null;
+
+/** Processa no máximo um item por varredura. O navegador não altera várias pesquisas de uma vez. */
+async function cpiScanOne():Promise<{found:number;outcomes:import('./cpi/full-cycle.ts').CpiCycleOutcome[]}>{
+  const who=account();
+  if(busy||maintenanceActive||sessionTransitionActive)throw new Error('Outra operação está em andamento.');
+  busy=true;
+  try {
+    const settings=await getSettings();
+    if(!settings.outputFolder)throw new Error('Configure uma pasta de PDFs antes da automação CPI.');
+    let filtered: Awaited<ReturnType<CpiBrowser['filterPendingPerson29']>>;
+    try { filtered=await cpiBrowser.filterPendingPerson29(); }
+    catch { throw new Error('Etapa filtro CPI 29: falha ao atualizar a listagem.'); }
+    if(filtered.state==='unconfirmed'||filtered.total===null)throw new Error('Etapa filtro CPI 29: total nao confirmado no portal.');
+    if(filtered.total===0)return {found:0,outcomes:[]};
+    let listed: Awaited<ReturnType<CpiBrowser['inspectPendingRows']>>;
+    try { listed=await cpiBrowser.inspectPendingRows(); }
+    catch { throw new Error('Etapa leitura CPI: nao foi possivel inspecionar as linhas apos o filtro.'); }
+    if(listed.state!=='mapped'||!listed.rows.length)throw new Error('Etapa leitura CPI: identificadores da listagem nao confirmados.');
+    // Revalidar o CPF dentro do processo principal; o renderer nunca recebe seus dígitos.
+    let ids:import('./cpi/pending-rows.ts').CpiPendingRowId|undefined;
+    for(const candidate of listed.rows){
+      const existing=await cpiWorkflow.get(who,candidate);
+      if(existing?.stage==='completed')continue;
+      ids=candidate;
+      break;
+    }
+    if(!ids)return {found:filtered.total,outcomes:[]};
+    const target=ids;
+    const result=await executeCpiPersonCycle({
+      account:who,ids:target,outputFolder:settings.outputFolder,
+      getCpf:async()=>{await cpiBrowser.inspectPendingPersonDetails(target);return cpiBrowser.readValidatedCpf(target);},
+      getJob:()=>cpiWorkflow.get(who,target),
+      claim:()=>cpiWorkflow.claim(who,target),
+      mark:(stage,updates)=>cpiWorkflow.mark(who,target,stage,updates),
+      findLatest:cpf=>history.findLatest(who,cpf,'person'),
+      beginHistory:cpf=>history.begin(who,cpf,'person'),
+      setQueryCode:(recordId,code)=>history.setCode(recordId,code),
+      getCredits:()=>client.credits(),
+      verifyPaidBalance:async credits=>{assertCpiPaidBalance(credits,await approvals.isApproved(who));},
+      paidApproved:()=>approvals.isApproved(who),
+      submitCpf:(cpf,onCode)=>client.submitCpf(cpf,onCode),
+      fetchByCode:code=>client.fetchByCode(code),
+      savePdf:async(cpf,recordId,code,data)=>{
+        const outcome=await saveReportPdf(settings.outputFolder!,{cpf,consultedAt:new Date().toISOString(),queryCode:code,data});
+        await history.addPdf(recordId,outcome.path);
+        showHistoryChange({kind:'person',recordId,state:'ready'});
+      },
+      uploadAndSave:async(pdf,result)=>{
+        if(sessionAccount!==who)throw new Error('Conta Deskdata alterada durante o processamento CPI.');
+        return cpiBrowser.uploadAndSavePersonResponse(target,pdf,result);
+      },
+      closeCompletedDetail:()=>cpiBrowser.closeCompletedDetail(target)
+    });
+    if(sessionAccount!==who)throw new Error('Conta Deskdata alterada durante o processamento CPI.');
+    return {found:filtered.total,outcomes:[result]};
+  }finally{busy=false;}
+}
 
 function guard(event:IpcMainInvokeEvent):void {
   if(!mainWindow || event.sender.id!==mainWindow.webContents.id || event.senderFrame!==mainWindow.webContents.mainFrame)throw new Error('Origem IPC não autorizada.');
@@ -165,6 +243,7 @@ async function resumePending(recordId:string):Promise<QueryExecution>{
   return pending(record,true);
 }
 async function queryAndSave(rawCpf:string):Promise<QueryExecution>{
+  if(cpiAuto?.isActive())throw new Error('Pause o ciclo CPI FULL AUTO antes de consultar manualmente.');
   if(busy)throw new Error('Já existe uma operação em execução.');
   if(typeof rawCpf!=='string'||!isValidCpf(rawCpf))throw new Error('CPF inválido.');
   const cpf=cpfDigits(rawCpf);
@@ -250,6 +329,7 @@ function reusedPis(result:PisQueryExecution):PisQueryExecution {
     : {...result,reused:true};
 }
 async function queryPisAndSave(rawCpf:string):Promise<PisQueryExecution>{
+  if(cpiAuto?.isActive())throw new Error('Pause o ciclo CPI FULL AUTO antes de consultar manualmente.');
   if(busy)throw new Error('Já existe uma operação em execução.');
   if(typeof rawCpf!=='string'||!isValidCpf(rawCpf))throw new Error('CPF inválido.');
   const cpf=cpfDigits(rawCpf);
@@ -309,6 +389,7 @@ async function exportCompany(cnpj:string,payload:unknown,recordId:string,queryCo
   return {...saved,recordId};
 }
 async function queryCompanyAndSave(rawCnpj:string):Promise<QueryExecution>{
+  if(cpiAuto?.isActive())throw new Error('Pause o ciclo CPI FULL AUTO antes de consultar manualmente.');
   if(busy)throw new Error('Já existe uma operação em execução.');
   if(typeof rawCnpj!=='string'||!isValidCnpj(rawCnpj))throw new Error('CNPJ inválido.');
   const cnpj=cnpjDigits(rawCnpj);
@@ -382,6 +463,11 @@ if(instanceLock)app.whenReady().then(()=>{
   const credentials = new CredentialStore(dataDir,protector);
   history = new QueryHistoryStore(dataDir,protector);
   approvals = new AccountApprovalStore(dataDir,protector);
+  cpiWorkflow = new CpiWorkflowStore(dataDir,protector);
+  cpiAuto = new CpiFullAutoRunner(cpiScanOne,snapshot=>{
+    if(mainWindow&&!mainWindow.isDestroyed()&&!mainWindow.webContents.isDestroyed())
+      mainWindow.webContents.send('cpi:auto:updated',snapshot);
+  });
   maintenance = new MaintenanceService(history);
   backups=new BackupService({userData:dataDir,backupDirectory:app.isPackaged?join(dataDir,'backups'):join(app.getAppPath(),'backups'),history,protector,getSettings});
   monitor = new PendingQueryMonitor({
@@ -405,7 +491,7 @@ if(instanceLock)app.whenReady().then(()=>{
   bind('maintenance:preview',async()=>{account();return maintenance.preview();});
   bind('backup:create',async()=>{
     account();
-    if(busy||maintenanceActive||sessionTransitionActive)throw new Error('Conclua a operação atual antes de criar o backup.');
+    if(busy||maintenanceActive||sessionTransitionActive||cpiAuto.isActive())throw new Error('Pause a automação CPI antes de criar o backup.');
     busy=true;
     try{const result=await backups.create();
       void diagnostics.write('backup_created',{state:'success'}).catch(()=>{});return result;
@@ -451,6 +537,99 @@ if(instanceLock)app.whenReady().then(()=>{
       return {...result,cancelled:false};
     }finally{maintenanceActive=false;busy=false;}
   });
+  bind('cpi:history:list',async()=>{
+    const who=account();
+    const items=await cpiWorkflow.list(who);
+    const completed=items.filter(item=>item.stage==='completed');
+    const reviewCount=items.filter(item=>['verification_required','review_required','submit_started'].includes(item.stage)).length;
+    const recent=await Promise.all(completed.slice(0,100).map(async item=>{
+      let pdfAvailable=false;
+      if(item.historyRecordId){
+        const record=await history.findById(who,item.historyRecordId);
+        if(record && (record.kind==='person'||record.kind===undefined) && record.account===who){
+          for(const path of record.pdfPaths){
+            if(await validateStoredPdf(path)){pdfAvailable=true;break;}
+          }
+        }
+      }
+      return {pesquisaId:item.pesquisaId,solicitacaoId:item.solicitacaoId,
+        classification:item.classification??'information',answeredAt:item.updatedAt,pdfAvailable};
+    }));
+    return {completedCount:completed.length,reviewCount,items:recent};
+  });
+  bind<[CpiPendingRowId]>('cpi:history:open-pdf',async ids=>{
+    const who=account();
+    if(!validateCpiRowId(ids))throw new Error('Identificador de solicitação inválido.');
+    const job=await cpiWorkflow.get(who,ids);
+    if(job?.stage!=='completed'||!job.historyRecordId)throw new Error('Pesquisa não concluída ou sem relatório vinculado.');
+    const record=await history.findById(who,job.historyRecordId);
+    if(!record||(record.kind!==undefined&&record.kind!=='person')||record.account!==who)throw new Error('Relatório não pertence à conta autenticada.');
+    for(const path of record.pdfPaths){
+      if(await validateStoredPdf(path)){
+        const error=await shell.openPath(path);
+        if(error)throw new Error('Não foi possível abrir o PDF no leitor padrão.');
+        return;
+      }
+    }
+    throw new Error('PDF vinculado indisponível ou inválido.');
+  });
+  bind('cpi:auto:status',async()=>{account();return cpiAuto.status();});
+  bind<[number]>('cpi:auto:start',async seconds=>{
+    account();
+    if(cpiMonitor.isActive()||busy||maintenanceActive)throw new Error('Pause o monitor e outras operações antes de iniciar FULL AUTO.');
+    if(cpiBrowser.status().state!=='open')throw new Error('Autentique-se na CPI pelo Edge antes de iniciar.');
+    if(!await approvals.isApproved(account()))throw new Error('Autorize consultas Deskdata para a conta em Minha conta.');
+    return cpiAuto.start(seconds);
+  });
+  bind('cpi:auto:pause',async()=>{account();return cpiAuto.pause();});
+  bind('cpi:open',async()=>{account();return cpiBrowser.open();});
+  bind('cpi:status',async()=>{account();return cpiBrowser.status();});
+  bind('cpi:inspect',async()=>{account();if(cpiMonitor.isActive()||cpiAuto.isActive())throw new Error('Pause o monitor antes de inspecionar o DOM.');return cpiBrowser.inspectControls();});
+  bind('cpi:filter-person-29',async()=>{account();if(cpiMonitor.isActive()||cpiAuto.isActive())throw new Error('Pause o monitor antes de aplicar o filtro manualmente.');return cpiBrowser.filterPendingPerson29();});
+  bind('cpi:rows:inspect',async()=>{account();if(cpiMonitor.isActive()||cpiAuto.isActive())throw new Error('Pause o monitor antes de inspecionar as linhas.');return cpiBrowser.inspectPendingRows();});
+  bind<[CpiPendingRowId]>('cpi:details:inspect',async(ids)=>{account();if(cpiMonitor.isActive()||cpiAuto.isActive())throw new Error('Pause o monitor antes de abrir os detalhes.');if(!validateCpiRowId(ids))throw new Error('Identificadores CPI inválidos.');return cpiBrowser.inspectPendingPersonDetails(ids);});
+  bind<[CpiPendingRowId]>('cpi:person:history',async(ids)=>{
+    const accountId = account();
+    if(cpiMonitor.isActive() || cpiAuto.isActive() || busy || maintenanceActive)throw new Error('Pause o monitoramento e conclua as operações atuais.');
+    if(!validateCpiRowId(ids))throw new Error('Identificadores CPI inválidos.');
+    // Revalida o detalhe ativo antes de usar o CPF somente no processo principal.
+    await cpiBrowser.inspectPendingPersonDetails(ids);
+    const cpf = cpiBrowser.readValidatedCpf(ids);
+    const {outputFolder}=await getSettings();
+    const result = await inspectCpiPersonHistory({
+      account:accountId,cpf,pesquisaId:ids.pesquisaId,solicitacaoId:ids.solicitacaoId,
+      outputFolder,findLatest:(currentAccount,currentCpf,kind)=>history.findLatest(currentAccount,currentCpf,kind)
+    });
+    if(sessionAccount!==accountId)throw new Error('Sessão alterada durante a leitura do histórico.');
+    return result;
+  });
+  bind<[CpiPendingRowId]>('cpi:person:prepare',async(ids)=>{
+    const accountId=account();
+    if(cpiMonitor.isActive() || cpiAuto.isActive() || busy || maintenanceActive)throw new Error('Pause o monitoramento e conclua as operacoes atuais.');
+    if(!validateCpiRowId(ids))throw new Error('Identificadores CPI invalidos.');
+    // Bloqueio de concorrencia abrange leitura de CPF, historico e GET opcional.
+    busy=true;
+    try {
+      await cpiBrowser.inspectPendingPersonDetails(ids);
+      const cpf=cpiBrowser.readValidatedCpf(ids);
+      const {outputFolder}=await getSettings();
+      const prepared=await prepareCpiPersonPdf({
+        ids,account:accountId,cpf,outputFolder,
+        findLatest:(who,document,kind)=>history.findLatest(who,document,kind),
+        recoverExisting:async record=>{
+          // resolveRecorded executa somente GET de codigo ja registrado.
+          const recovered=await resolveRecorded(record);
+          return {state:recovered.state};
+        }
+      });
+      if(sessionAccount!==accountId)throw new Error('Sessao Deskdata alterada durante a preparacao.');
+      return prepared;
+    } finally { busy=false; }
+  });
+  bind<[number]>('cpi:monitor:start',async(intervalSeconds)=>{account();if(cpiAuto.isActive())throw new Error('Pause o ciclo FULL AUTO primeiro.');if(cpiBrowser.status().state!=='open')throw new Error('Abra o Edge e autentique na CPI antes de iniciar o monitor.');return cpiMonitor.start(intervalSeconds);});
+  bind('cpi:monitor:pause',async()=>{account();return cpiMonitor.pause();});
+  bind('cpi:monitor:status',async()=>{account();return cpiMonitor.status();});
+  bind('cpi:close',async()=>{account();await cpiAuto.pause();await cpiMonitor.stopAndWait();await cpiBrowser.close();});
   bind('credentials:status',()=>credentials.status());
   bind('credentials:load',()=>credentials.load());
   bind('credentials:forget',()=>credentials.clear());
@@ -480,6 +659,9 @@ if(instanceLock)app.whenReady().then(()=>{
     try {
       monitor.stopAll();
       await Promise.allSettled([...activeCompletions]);
+      await cpiAuto.pause();
+      await cpiMonitor.stopAndWait();
+      await cpiBrowser.close();
       client.reset();sessionAccount=null;lastCompanyResponse=null;lastReport=null;lastRecordId=null;lastSavedPdf=null;lastPisResponse=null;queryRecovery.clear();
     }finally{sessionTransitionActive=false;}
   });
@@ -533,6 +715,9 @@ app.on('before-quit',event=>{
   monitor?.stopAll();
   void (async()=>{
     await Promise.allSettled([...activeCompletions]);
+    await cpiAuto.pause();
+    await cpiMonitor.stopAndWait();
+    await cpiBrowser.close();
     await history?.close();
   })().catch(error=>{
     // Não registrar payloads, tokens ou identificadores nos diagnósticos.

@@ -38,7 +38,56 @@ export interface BackupResult { path:string; size:number; createdAt:string }
 export interface MaintenanceSelection { pdfs:boolean; history:boolean }
 export interface MaintenancePreview { recordCount:number; pdfCount:number; pendingCount:number }
 export interface MaintenanceResult { deletedPdfs:number; missingPdfs:number; deletedRecords:number; cancelled:boolean }
+export interface CpiBrowserStatus { state: 'closed' | 'open'; host?: string }
+export interface CpiControlInfo { tag: string; id?: string; name?: string; type?: string; role?: string }
+export interface CpiDomInspection { controls: CpiControlInfo[]; truncated: boolean; framesInspected: number }
+export interface CpiPendingFilterResult { typeId:'29'; total:number|null; state:'empty'|'found'|'unconfirmed' }
+export interface CpiPendingRowId { pesquisaId:string; solicitacaoId:string }
+export interface CpiPendingPersonDetail { pesquisaId:string; solicitacaoId:string; cpfValidated:true; cpfMasked:string; status:'aguardando' }
+export interface CpiPendingRowsInspection { state:'empty'|'mapped'|'needs_mapping'|'unconfirmed'; total:number|null; visibleRows:number; rows:CpiPendingRowId[]; framesInspected:number; message:string }
+export type CpiPersonHistoryState = 'no_history'|'not_ready'|'folder_unconfigured'|'pdf_unavailable'|'pdf_available';
+export interface CpiPersonHistoryResult { state:CpiPersonHistoryState; pesquisaId:string; solicitacaoId:string; recordDate?:string }
+export type CpiPersonPreparationState = 'requires_paid_authorization' | 'folder_unconfigured' | 'manual_review' | 'pending' | 'pdf_ready';
+export interface CpiPersonPreparationResult extends CpiPendingRowId { state:CpiPersonPreparationState; reused:boolean }
+export interface CpiHistoryItem extends CpiPendingRowId {
+  classification: 'restrictions'|'information';
+  answeredAt: string;
+  pdfAvailable: boolean;
+}
+export interface CpiHistoryOverview {
+  completedCount: number;
+  reviewCount: number;
+  items: CpiHistoryItem[];
+}
+export interface CpiAutoSnapshot {
+  phase:'stopped'|'running'|'waiting'|'paused'|'error';
+  checks:number;processed:number;lastMessage:string;nextCheckAt:string|null;intervalSeconds:number;
+}
+export interface CpiMonitorSnapshot {
+  phase: 'stopped'|'checking'|'waiting'|'paused'|'needs_mapping'|'error';
+  intervalSeconds: number; checks: number; lastCheckedAt: string|null; nextCheckAt: string|null;
+  lastTotal: number|null; lastResult: CpiPendingFilterResult['state']|null; message: string|null;
+}
 export interface DesktopApi {
+  cpiAutoStatus():Promise<CpiAutoSnapshot>;
+  cpiAutoStart(seconds:number):Promise<CpiAutoSnapshot>;
+  cpiAutoPause():Promise<CpiAutoSnapshot>;
+  subscribeCpiAuto(callback:(value:CpiAutoSnapshot)=>void):()=>void;
+  cpiHistory():Promise<CpiHistoryOverview>;
+  cpiOpenHistoryPdf(ids:CpiPendingRowId):Promise<void>;
+  cpiOpen(): Promise<CpiBrowserStatus>;
+  cpiStatus(): Promise<CpiBrowserStatus>;
+  cpiInspect(): Promise<CpiDomInspection>;
+  cpiFilterPerson29():Promise<CpiPendingFilterResult>;
+  cpiInspectPendingRows():Promise<CpiPendingRowsInspection>;
+  cpiInspectPendingPersonDetails(ids:CpiPendingRowId):Promise<CpiPendingPersonDetail>;
+  cpiInspectPersonHistory(ids:CpiPendingRowId):Promise<CpiPersonHistoryResult>;
+  cpiPreparePersonPdf(ids:CpiPendingRowId):Promise<CpiPersonPreparationResult>;
+  cpiClose(): Promise<void>;
+  cpiMonitorStart(intervalSeconds:number):Promise<CpiMonitorSnapshot>;
+  cpiMonitorPause():Promise<CpiMonitorSnapshot>;
+  cpiMonitorStatus():Promise<CpiMonitorSnapshot>;
+  subscribeCpiMonitor(callback:(snapshot:CpiMonitorSnapshot)=>void):()=>void;
   getSettings(): Promise<AppSettings>;
   maintenancePreview():Promise<MaintenancePreview>;
   createBackup():Promise<BackupResult>;

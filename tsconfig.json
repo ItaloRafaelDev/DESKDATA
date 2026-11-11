@@ -9,7 +9,7 @@
     "noEmit": true,
     "esModuleInterop": true,
     "allowImportingTsExtensions": true,
-    "lib": ["ES2022", "DOM"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["node", "vite/client"]
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "electron.vite.config.ts"]

@@ -1,7 +1,34 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { DesktopApi, QueryUpdate } from '../shared/types.ts';
+import type { DesktopApi, QueryUpdate, CpiMonitorSnapshot, CpiAutoSnapshot, CpiPendingRowId } from '../shared/types.ts';
 
 const api:DesktopApi={
+  cpiAutoStatus:()=>ipcRenderer.invoke('cpi:auto:status'),
+  cpiAutoStart:seconds=>ipcRenderer.invoke('cpi:auto:start',seconds),
+  cpiAutoPause:()=>ipcRenderer.invoke('cpi:auto:pause'),
+  subscribeCpiAuto:callback=>{
+    const listener=(_event:Electron.IpcRendererEvent,snapshot:CpiAutoSnapshot)=>callback(snapshot);
+    ipcRenderer.on('cpi:auto:updated',listener);
+    return ()=>ipcRenderer.removeListener('cpi:auto:updated',listener);
+  },
+  cpiHistory:()=>ipcRenderer.invoke('cpi:history:list'),
+  cpiOpenHistoryPdf:ids=>ipcRenderer.invoke('cpi:history:open-pdf',ids),
+  cpiOpen:()=>ipcRenderer.invoke('cpi:open'),
+  cpiStatus:()=>ipcRenderer.invoke('cpi:status'),
+  cpiInspect:()=>ipcRenderer.invoke('cpi:inspect'),
+  cpiFilterPerson29:()=>ipcRenderer.invoke('cpi:filter-person-29'),
+  cpiInspectPendingRows:()=>ipcRenderer.invoke('cpi:rows:inspect'),
+  cpiInspectPendingPersonDetails:(ids:CpiPendingRowId)=>ipcRenderer.invoke('cpi:details:inspect',ids),
+  cpiInspectPersonHistory:(ids:CpiPendingRowId)=>ipcRenderer.invoke('cpi:person:history',ids),
+  cpiPreparePersonPdf:(ids:CpiPendingRowId)=>ipcRenderer.invoke('cpi:person:prepare',ids),
+  cpiClose:()=>ipcRenderer.invoke('cpi:close'),
+  cpiMonitorStart:intervalSeconds=>ipcRenderer.invoke('cpi:monitor:start',intervalSeconds),
+  cpiMonitorPause:()=>ipcRenderer.invoke('cpi:monitor:pause'),
+  cpiMonitorStatus:()=>ipcRenderer.invoke('cpi:monitor:status'),
+  subscribeCpiMonitor:callback=>{
+    const listener=(_event:Electron.IpcRendererEvent,snapshot:CpiMonitorSnapshot)=>callback(snapshot);
+    ipcRenderer.on('cpi:monitor:updated',listener);
+    return ()=>ipcRenderer.removeListener('cpi:monitor:updated',listener);
+  },
   getSettings:()=>ipcRenderer.invoke('settings:get'),
   maintenancePreview:()=>ipcRenderer.invoke('maintenance:preview'),
   createBackup:()=>ipcRenderer.invoke('backup:create'),
