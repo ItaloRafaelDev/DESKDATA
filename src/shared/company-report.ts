@@ -1,6 +1,8 @@
 import { formatCnpj } from './cnpj.ts';
 import { companyActivityList, formatCompanyActivity, formatCompanyValue } from './company-format.ts';
-import { formatCaseNumber, formatCpfOrCnpj, formatDatePtBr, formatAddressRecord, formatPhoneRecord, normalizeToken, translateEnum } from './localization.ts';
+import { formatCaseNumber, formatCpfOrCnpj, formatDatePtBr, formatAddressRecord, formatPhoneRecord, translateEnum } from './localization.ts';
+import { normalizeJudicialDataset } from './normalizer.ts';
+import { resolveJudicialCompetence } from './judicial.ts';
 export const COMPANY_DATASETS=['basic','phones','addresses','emails','relationships','lawsuits'] as const;
 export type CompanyDataset=(typeof COMPANY_DATASETS)[number];
 export type CompanyRecord={basic:Record<string,unknown>; phones:unknown[];addresses:unknown[];emails:unknown[];relationships:unknown[];lawsuits:unknown[]};
@@ -9,6 +11,7 @@ function get(o:Record<string,unknown>,...keys:string[]):unknown{for(const k of k
 function esc(v:unknown):string{return formatCompanyValue(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function text(v:unknown):string{return formatCompanyValue(v);}
 function list(data:Record<string,unknown>,key:CompanyDataset):unknown[]{
+ if(key==='lawsuits')return normalizeJudicialDataset(data[key]).items;
  const value=obj(data[key]);if(!value)throw new Error(`Dataset ${key} não retornou objeto válido.`);
  if(value.error||obj(value.status)?.code && ![4000,2000].includes(Number(obj(value.status)?.code)))throw new Error(`Dataset ${key} retornou erro específico.`);
  if(Array.isArray(value.items))return value.items;
@@ -53,8 +56,8 @@ function fieldBasic(b:Record<string,unknown>,cnpj:string):string{
  const activities=(v:unknown[]):string=>v.map((x,i)=>row(String(i+1).padStart(2,'0'),formatCompanyActivity(x))).join('');
  return fields.map(([l,v])=>row(l,v)).join('')+section('Atividade econômica principal',activities(mainActivities))+section('Atividades econômicas secundárias',activities(secondary));
 }
-function caseCompetence(p:Record<string,unknown>):unknown{return get(p,'court_type','competence','competencia');}
-function isCriminal(p:Record<string,unknown>):boolean{return normalizeToken(text(caseCompetence(p)))==='CRIMINAL';}
+function caseCompetence(p:Record<string,unknown>):unknown{return resolveJudicialCompetence(p).displayValue;}
+function isCriminal(p:Record<string,unknown>):boolean{return resolveJudicialCompetence(p).criminal;}
 function caseItem(p0:unknown,i:number):string{
  const p=obj(p0)??{};const criminal=isCriminal(p);
  const fields:[string,unknown][]=[['Número',get(p,'number','case_number')?formatCaseNumber(get(p,'number','case_number')):undefined],['Tipo',enumText(get(p,'type'))],['Assunto',get(p,'primary_subject','subject')],['Tribunal',get(p,'court_name','court')],['Vara',get(p,'court_branch','branch')],['Comarca',get(p,'court_district')],['Competência',enumText(caseCompetence(p))],['Situação',enumText(get(p,'status'))]];

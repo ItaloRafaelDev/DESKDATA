@@ -1,5 +1,5 @@
 import type { NormalizedData } from '../../shared/types.ts';
-import { isCriminalCompetence } from '../../shared/report.ts';
+import { inspectJudicialDataset, resolveJudicialCompetence, type JudicialIssue } from '../../shared/judicial.ts';
 
 export type CpiPersonClassification =
   | { state: 'classified'; result: 'restrictions' | 'information'; count: number }
@@ -7,32 +7,24 @@ export type CpiPersonClassification =
 
 /** Regras operacionais da CPI. Não equivalem a presunção de culpa ou responsabilidade. */
 export function classifyCpiPerson(data: NormalizedData): CpiPersonClassification {
+  return assessCpiPerson(data).classification;
+}
+export function assessCpiPerson(data:NormalizedData):{classification:CpiPersonClassification;issues:JudicialIssue[]} {
   const lawsuits = data?.lawsuits;
   const payload = lawsuits?.value;
-  if (!lawsuits || !payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    return { state: 'review_required', reason: 'incomplete_lawsuits' };
+  const issue=inspectJudicialDataset(payload);
+  if(issue)return {classification:{state:'review_required',reason:'incomplete_lawsuits'},issues:[issue]};
+  const items=(payload as {items:Record<string,unknown>[]}).items;
+  if(lawsuits.status!==(items.length?'ok':'empty')){
+    return {classification:{state:'review_required',reason:'incomplete_lawsuits'},issues:[{code:'status_mismatch'}]};
   }
-  const items = (payload as Record<string, unknown>).items;
-  if (!Array.isArray(items) || (lawsuits.status === 'empty' && items.length !== 0)) {
-    return { state: 'review_required', reason: 'incomplete_lawsuits' };
-  }
-  if (items.length === 0) {
-    return lawsuits.status === 'empty'
-      ? { state: 'classified', result: 'information', count: 0 }
-      : { state: 'review_required', reason: 'incomplete_lawsuits' };
-  }
-  let unknownCompetence = false;
+  const issues:JudicialIssue[]=[];
   let criminal = false;
-  for (const item of items) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      unknownCompetence = true;
-      continue;
-    }
-    const details = item as Record<string, unknown>;
-    const competence = details.court_type ?? details.competence ?? details.competencia;
-    if (typeof competence !== 'string' || !competence.trim()) unknownCompetence = true;
-    else if (isCriminalCompetence(competence)) criminal = true;
+  for (const [itemIndex,item] of items.entries()) {
+    const competence=resolveJudicialCompetence(item);
+    if(competence.issue)issues.push({...competence.issue,itemIndex});
+    else if(competence.criminal)criminal=true;
   }
-  if (unknownCompetence) return { state: 'review_required', reason: 'unknown_competence' };
-  return { state: 'classified', result: criminal ? 'restrictions' : 'information', count: items.length };
+  return {classification:issues.length?{state:'review_required',reason:'unknown_competence'}:
+    {state:'classified',result:criminal?'restrictions':'information',count:items.length},issues};
 }

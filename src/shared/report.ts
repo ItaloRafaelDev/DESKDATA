@@ -1,5 +1,7 @@
 import type { ReportPayload } from './types.ts';
-import { formatAddressRecord, formatCaseNumber, formatCpfOrCnpj, formatDatePtBr, formatPhoneRecord, normalizeToken, translateEnum } from './localization.ts';
+import { formatAddressRecord, formatCaseNumber, formatCpfOrCnpj, formatDatePtBr, formatPhoneRecord, translateEnum } from './localization.ts';
+import { isExplicitCriminal, resolveJudicialCompetence } from './judicial.ts';
+import { normalizeJudicialDataset } from './normalizer.ts';
 
 function obj(v:unknown):Record<string,unknown>|null{return v!==null && typeof v==='object' && !Array.isArray(v)?v as Record<string,unknown>:null;}
 function array(v:unknown):unknown[]{return Array.isArray(v)?v:[];}
@@ -51,8 +53,8 @@ function emailRows(items:unknown[]):string{
     return cell(String(i+1).padStart(2,'0'),o?pick(o,'email','address','value')??'Não informado':String(item));
   }).join(''));
 }
-export function isCriminalCompetence(value:unknown):boolean {return typeof value==='string' && normalizeToken(value)==='CRIMINAL';}
-function competence(p:Record<string,unknown>):unknown{return pick(p,'court_type','competence','competencia');}
+export function isCriminalCompetence(value:unknown):boolean {return isExplicitCriminal(value);}
+function competence(p:Record<string,unknown>):unknown{return resolveJudicialCompetence(p).displayValue;}
 function summaryRows(p:Record<string,unknown>):string{
   const num=pick(p,'number','case_number','process_number');
   const fields:[string,unknown][]=[
@@ -102,7 +104,7 @@ function renderActivity(title:string,v:unknown):string{
 }
 function renderCase(v:unknown,i:number):string{
   const p=obj(v)??{};
-  const red=isCriminalCompetence(competence(p));
+  const red=resolveJudicialCompetence(p).criminal;
   const num=pick(p,'number','case_number','process_number');
   const title=num?formatCaseNumber(num):`Processo ${String(i+1).padStart(2,'0')}`;
   return `<article class="processo${red?' criminal':''}"><div class="case-head"><div><span class="eyebrow">PROCESSO ${String(i+1).padStart(2,'0')}</span><h3>${html(title)}</h3></div><span class="sphere${red?' criminal-label':''}">${html(competence(p)?translateEnum(competence(p)):'Competência não informada')}</span></div>
@@ -113,7 +115,7 @@ export function renderReportHtml(report:ReportPayload):string{
   const phones=array(obj(report.data.phones.value)?.items);
   const addresses=array(obj(report.data.addresses.value)?.items);
   const emails=array(obj(report.data.emails.value)?.items);
-  const lawsuits=array(obj(report.data.lawsuits.value)?.items);
+  const lawsuits=normalizeJudicialDataset(report.data.lawsuits.value).items;
   const name=identityName(basic);
   const date=new Date(report.consultedAt);
   const when=Number.isNaN(date.getTime())?'Não informada':date.toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'});
