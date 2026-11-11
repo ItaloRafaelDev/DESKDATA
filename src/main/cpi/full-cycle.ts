@@ -1,14 +1,15 @@
 import { isValidCpf } from '../../shared/cpf.ts';
-import { normalizeDeskdataResponse } from '../../shared/normalizer.ts';
+import { DataContractError, normalizeDeskdataResponse } from '../../shared/normalizer.ts';
+import type { JudicialIssueCode } from '../../shared/judicial.ts';
 import { assertRecoveredCpf } from '../../shared/query-identity.ts';
 import type { NormalizedData } from '../../shared/types.ts';
 import type { QueryRecord } from '../query-history.ts';
-import { classifyCpiPerson } from './person-rules.ts';
+import { assessCpiPerson } from './person-rules.ts';
 import type { CpiPendingRowId } from './pending-rows.ts';
 import { findCpiPersonPdf } from './person-pdf.ts';
 import type { CpiWorkItem, CpiWorkStage } from './workflow-store.ts';
 
-export type CpiCycleOutcome = {state:'completed'|'verification_required'|'pending'|'review_required'; pesquisaId:string;solicitacaoId:string;message:string;warning?:'auxiliary_404'};
+export type CpiCycleOutcome = {state:'completed'|'verification_required'|'pending'|'review_required'; pesquisaId:string;solicitacaoId:string;message:string;warning?:'auxiliary_404';reviewReason?:JudicialIssueCode};
 export interface FullCycleServices {
   account:string;
   ids:CpiPendingRowId;
@@ -16,7 +17,7 @@ export interface FullCycleServices {
   getCpf():Promise<string>;
   getJob():Promise<CpiWorkItem|null>;
   claim():Promise<CpiWorkItem>;
-  mark(stage:CpiWorkStage, updates?:Pick<CpiWorkItem,'historyRecordId'|'classification'>):Promise<CpiWorkItem>;
+  mark(stage:CpiWorkStage, updates?:Pick<CpiWorkItem,'historyRecordId'|'classification'|'reviewReason'>):Promise<CpiWorkItem>;
   findLatest(cpf:string):Promise<QueryRecord|null>;
   beginHistory(cpf:string):Promise<QueryRecord>;
   setQueryCode(recordId:string,code:string):Promise<void>;
@@ -29,8 +30,8 @@ export interface FullCycleServices {
   uploadAndSave(pdfPath:string,classification:'restrictions'|'information'):Promise<'confirmed'|'confirmed_auxiliary_404'|'unverified'|'not_submitted'>;
   closeCompletedDetail():Promise<void>;
 }
-function outcome(args:FullCycleServices,state:CpiCycleOutcome['state'],message:string,warning?:CpiCycleOutcome['warning']):CpiCycleOutcome {
-  return {...args.ids,state,message,...(warning?{warning}:{})};
+function outcome(args:FullCycleServices,state:CpiCycleOutcome['state'],message:string,warning?:CpiCycleOutcome['warning'],reviewReason?:JudicialIssueCode):CpiCycleOutcome {
+  return {...args.ids,state,message,...(warning?{warning}:{}),...(reviewReason?{reviewReason}:{})};
 }
 /**
  * Uma solicitação por execução. Nenhum POST será repetido caso uma resposta seja incerta.
@@ -41,7 +42,7 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
   let job=await s.getJob();
   if(job&&['completed','submit_started','verification_required','review_required'].includes(job.stage)){
     return outcome(s,job.stage==='completed'?'completed':'review_required',
-      'Esta solicitação já foi processada ou requer verificação manual; nenhum envio repetido.');
+      'Esta solicitação já foi processada ou requer verificação manual; nenhum envio repetido.',undefined,job.reviewReason);
   }
   const cpf=await s.getCpf();
   if(!isValidCpf(cpf))throw new Error('CPF do detalhe CPI inválido.');
@@ -86,22 +87,30 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
     payload=received.payload;
   }
   assertRecoveredCpf(payload,cpf);
-  const data=normalizeDeskdataResponse(payload);
-  const classification=classifyCpiPerson(data);
+  let data:NormalizedData;
+  try{data=normalizeDeskdataResponse(payload);}
+  catch(error){
+    if(!(error instanceof DataContractError)||!error.issue)throw error;
+    await s.mark('review_required',{historyRecordId:record.id,reviewReason:error.issue.code});
+    return outcome(s,'review_required','Integridade judicial não confirmada; PDF e envio CPI bloqueados.',undefined,error.issue.code);
+  }
+  const assessment=assessCpiPerson(data);
+  const classification=assessment.classification;
   if(classification.state!=='classified'){
-    await s.mark('review_required',{historyRecordId:record.id});
-    return outcome(s,'review_required','Processos incompletos ou competência não identificável; envio CPI bloqueado.');
+    const reviewReason=assessment.issues[0].code;
+    await s.mark('review_required',{historyRecordId:record.id,reviewReason});
+    return outcome(s,'review_required','Processos incompletos ou competência não identificável; envio CPI bloqueado.',undefined,reviewReason);
   }
-  if(record.status!=='ready'){
-    await s.savePdf(cpf,record.id,queryCode,data);
-  }else{
-    try{await findCpiPersonPdf(record,cpf,s.outputFolder);}
-    catch{await s.savePdf(cpf,record.id,queryCode,data);}
-  }
+  // Um PDF ready pode ter sido emitido de outra versão da resposta. A assinatura
+  // e o vínculo CPF/registro não comprovam quais processos ele contém.
+  const previousPdfPaths=new Set(record.pdfPaths);
+  await s.savePdf(cpf,record.id,queryCode,data);
   // Recarregar o histórico após gerar um PDF: não confiar em referência desatualizada.
   const updated=await s.findLatest(cpf);
   if(!updated||updated.id!==record.id)throw new Error('Histórico mudou durante geração do PDF.');
-  const pdf=await findCpiPersonPdf(updated,cpf,s.outputFolder);
+  const currentPdfPaths=updated.pdfPaths.filter(path=>!previousPdfPaths.has(path));
+  // Nunca voltar silenciosamente ao PDF legado se a geração atual não foi vinculada.
+  const pdf=await findCpiPersonPdf({...updated,pdfPaths:currentPdfPaths},cpf,s.outputFolder);
   await s.mark('pdf_ready',{historyRecordId:record.id,classification:classification.result});
   // Sem retry após esta marcação: eventual timeout ou queda pode significar envio já aceito.
   await s.mark('submit_started');

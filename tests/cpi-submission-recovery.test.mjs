@@ -16,7 +16,8 @@ for(const mode of ['unverified','exception','not_submitted','submit_started']){
     try{
       const path=join(dir,`RELATORIO_${cpf}_2026-11-11.pdf`),bytes=Buffer.from('%PDF-1.4\n'+'fixture'.repeat(30));
       await writeFile(path,bytes);
-      let store=new CpiWorkflowStore(dir,protector),uploads=0,opens=0;
+      let store=new CpiWorkflowStore(dir,protector),uploads=0,opens=0,renders=0;
+      const refreshedPath=join(dir,`RELATORIO_${cpf}_2026-11-11-02.pdf`);
       const record={id:'123e4567-e89b-12d3-a456-426614174000',account,cpf,kind:'person',status:'ready',queryCode:'Q-AAAAAAAAAA',pdfPaths:[path]};
       await store.claim(account,ids);
       await store.mark(account,ids,'pdf_ready',{historyRecordId:record.id,classification:'restrictions'});
@@ -29,9 +30,14 @@ for(const mode of ['unverified','exception','not_submitted','submit_started']){
         verifyPaidBalance:async()=>{throw Error('Consulta indevida');},submitCpf:async()=>{throw Error('POST indevido');},
         fetchByCode:async()=>({queryCode:record.queryCode,payload:{status:{code:4000},data:{basic:{tax_id:{number:cpf}},
           phones:{items:[]},emails:{items:[]},addresses:{items:[]},lawsuits:{items:[{court_type:'Criminal'}]}}}}),
-        savePdf:async()=>{throw Error('PDF não deve ser substituído');},
+        // Etapa 4: gerar outro PDF do mesmo snapshot; nunca sobrescrever o legado.
+        savePdf:async(document,id,queryCode,data)=>{
+          assert.equal(document,cpf);assert.equal(id,record.id);assert.equal(queryCode,record.queryCode);
+          assert.equal(data.lawsuits.value.items[0].court_type,'Criminal');renders++;
+          await writeFile(refreshedPath,bytes);record.pdfPaths.push(refreshedPath);
+        },
         uploadAndSave:async(file,classification)=>{
-          uploads++;assert.equal(file,path);assert.equal(classification,'restrictions');
+          uploads++;assert.equal(file,refreshedPath);assert.equal(classification,'restrictions');
           assert.equal((await store.get(account,ids)).stage,'submit_started');
           if(mode==='exception')throw Error('Conexão perdida após POST');
           return mode;
@@ -51,6 +57,7 @@ for(const mode of ['unverified','exception','not_submitted','submit_started']){
       assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
       assert.equal(uploads,priorUploads);assert.equal(opens,priorOpens);
       assert.equal(uploads,mode==='submit_started'?0:1);
+      assert.equal(renders,mode==='submit_started'?0:1);
       assert.deepEqual(await readFile(path),bytes);
     }finally{await rm(dir,{recursive:true,force:true,maxRetries:3,retryDelay:100});}
   });

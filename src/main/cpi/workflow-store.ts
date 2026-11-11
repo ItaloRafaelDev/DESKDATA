@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { CredentialProtector } from '../credentials.ts';
 import { validateCpiRowId, type CpiPendingRowId } from './pending-rows.ts';
+import { JUDICIAL_ISSUE_CODES, type JudicialIssueCode } from '../../shared/judicial.ts';
 
 /** Dados de controle cifrados. Nenhum CPF, documento, PDF ou token é persistido aqui. */
 export type CpiWorkStage = 'claimed'|'query_started'|'query_pending'|'pdf_ready'|'submit_started'|'completed'|'verification_required'|'review_required';
@@ -11,6 +12,7 @@ export interface CpiWorkItem extends CpiPendingRowId {
   stage: CpiWorkStage;
   historyRecordId?: string;
   classification?: 'restrictions'|'information';
+  reviewReason?:JudicialIssueCode;
   updatedAt: string;
 }
 type Stored = { version:1; items:CpiWorkItem[] };
@@ -21,7 +23,8 @@ function valid(row:unknown):row is CpiWorkItem {
   return !!validateCpiRowId(r) && typeof r.account==='string' && !!r.account.trim() &&
     stages.has(r.stage as CpiWorkStage) && typeof r.updatedAt==='string' && !Number.isNaN(Date.parse(r.updatedAt)) &&
     (r.historyRecordId===undefined || (typeof r.historyRecordId==='string' && /^[a-f0-9-]{30,50}$/i.test(r.historyRecordId))) &&
-    (r.classification===undefined || r.classification==='restrictions' || r.classification==='information');
+    (r.classification===undefined || r.classification==='restrictions' || r.classification==='information') &&
+    (r.reviewReason===undefined || JUDICIAL_ISSUE_CODES.includes(r.reviewReason));
 }
 function key(account:string,ids:CpiPendingRowId):string {return `${account.trim().toLowerCase()}|${ids.solicitacaoId}|${ids.pesquisaId}`;}
 export class CpiWorkflowStore {
@@ -84,7 +87,7 @@ export class CpiWorkflowStore {
       db.items.push(entry);await this.write(db);return entry;
     });
   }
-  async mark(account:string,ids:CpiPendingRowId,stage:CpiWorkStage,updates:Pick<CpiWorkItem,'historyRecordId'|'classification'>={}):Promise<CpiWorkItem>{
+  async mark(account:string,ids:CpiPendingRowId,stage:CpiWorkStage,updates:Pick<CpiWorkItem,'historyRecordId'|'classification'|'reviewReason'>={}):Promise<CpiWorkItem>{
     if(!stages.has(stage))throw new Error('Estado CPI inválido.');
     return this.locked(async()=>{
       const db=await this.read();
