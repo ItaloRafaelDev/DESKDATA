@@ -104,6 +104,6 @@ export async function withMainProcess(submitCpf,run,options={}){
       await handlers.get('cpi:auto:pause')({sender:window.webContents,senderFrame:window.webContents.mainFrame}).catch(()=>{});
     }
     await Promise.all(stores.map(store=>store.close()));
-    await rm(root,{recursive:true,force:true});
+    await rm(root,{recursive:true,force:true,maxRetries:3,retryDelay:100});
   }
 }

@@ -13,7 +13,7 @@ const protector = {
 
 const withStore = async fn => {
   const folder = await mkdtemp(join(tmpdir(),'deskdata-approval-'));
-  try {await fn(folder);} finally {await rm(folder,{recursive:true,force:true});}
+  try {await fn(folder);} finally {await rm(folder,{recursive:true,force:true,maxRetries:3,retryDelay:100});}
 };
 
 test('autorização inicia revogada por conta, inclusive quando o legado global era verdadeiro',async()=>withStore(async folder=>{
