@@ -43,6 +43,13 @@ export class BackupService {
       const settingsCipher=await this.options.protector.encrypt(JSON.stringify({outputFolder:settings.outputFolder}));
       const components=[{name:'history.sqlite',data:snapshot},{name:'history-key.bin',data:key},{name:'history-state.flag',data:state},{name:'settings.bin',data:settingsCipher}];
       if(approvals)components.push({name:'credit-approvals.bin',data:approvals});
+      // Copias das reservas e da fila CPI, ambas cifradas pela conta do Windows.
+      // Nunca incluir CPFs, respostas de API, PDFs ou cookies da sessao do navegador.
+      for(const filename of ['cpi-automatic-budget.bin','cpi-workflows.bin']){
+        try{const protectedData=await readFile(join(this.options.userData,filename));
+          components.push({name:filename,data:protectedData});}
+        catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+      }
       const createdAt=new Date().toISOString();
       const manifest={format:'deskdata-backup-v1',createdAt,recordCount:records.length,
         files:components.map(item=>({name:item.name,size:item.data.length,sha256:createHash('sha256').update(item.data).digest('hex')})),

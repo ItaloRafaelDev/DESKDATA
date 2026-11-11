@@ -168,3 +168,53 @@ h1,h2,p { margin-top: 0; }
 
 /* Infraestrutura local: ações compactas e caminho do último backup */
 .backup-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.backup-actions button{display:inline-flex;align-items:center;justify-content:center;gap:8px}.backup-path{overflow-wrap:anywhere;max-width:100%}
+
+/* CPI Central — leitura controlada (fase 1) */
+.cpi-panel{max-width:950px}.cpi-session{display:flex;align-items:center;gap:12px;flex-wrap:wrap;color:#556b86;font-size:12px;margin-bottom:16px}.cpi-inspection{max-height:330px;overflow:auto;border:1px solid var(--line);border-radius:9px;background:#fafcff}.cpi-dom-row{display:flex;gap:14px;align-items:flex-start;padding:9px 12px;border-bottom:1px solid #e8eef6;font-size:11px;overflow-wrap:anywhere}.cpi-dom-row:last-child{border-bottom:0}.cpi-dom-row code{flex:0 0 75px;font-weight:700;color:#245a9b}.cpi-dom-row span{min-width:0;color:#496481}
+
+/* CPI Fase 3A: intervalo livre em segundos e temporizador da próxima verificação */
+.cpi-interval { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-muted, #606b7c); }
+.cpi-interval input { width: 145px; min-height: 36px; padding: 8px 10px; border: 1px solid #cad5e2; border-radius: 7px; background: #fff; color: #172b48; }
+.cpi-interval input[aria-invalid="true"] { border-color: #c94d4d; }
+.cpi-interval-error { color: #b83737; }
+.cpi-countdown { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0; font-size: 13px; color: #405675; }
+.cpi-countdown strong { color: #18457d; font-size: 22px; font-variant-numeric: tabular-nums; letter-spacing: .04em; }
+
+/* CPI 3B: a tabela apresenta apenas os IDs numericos do registro, sem CPF. */
+.cpi-id-list{max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:9px;margin-top:12px}
+.cpi-id-list table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+.cpi-id-list th,.cpi-id-list td{padding:10px 12px;text-align:left;border-bottom:1px solid #e8eef6}
+.cpi-id-list thead{background:#f3f7fc;position:sticky;top:0}
+.cpi-id-list tr:last-child td{border-bottom:0}
+
+/* Painel operacional CPI: uma única superfície para acompanhamento e histórico. */
+.cpi-dashboard-heading{margin-bottom:18px}
+.cpi-dashboard-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.cpi-kpi{min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow);display:grid;gap:5px}
+.cpi-kpi>span{font-size:11px;color:#607894;font-weight:650}
+.cpi-kpi strong{font-size:23px;color:#163452;font-variant-numeric:tabular-nums;line-height:1.2}
+.cpi-kpi small{font-size:10px;color:#8699ae}
+.cpi-kpi .cpi-state{font-size:19px}
+.cpi-state.running,.cpi-state.waiting{color:#137451}
+.cpi-state.error{color:#b84040}
+.cpi-dashboard-panel{max-width:none;margin-bottom:15px}
+.cpi-agent-toolbar{display:flex;align-items:flex-end;gap:15px;flex-wrap:wrap;margin:13px 0}
+.cpi-browser-indicator{display:flex;align-items:center;gap:9px;color:#6c7888;font-weight:700;font-size:11px;padding:10px 12px;border-radius:8px;background:#f4f6fa;white-space:nowrap}
+.cpi-browser-indicator.online{color:#176a4e;background:#ecf8f2}
+.cpi-browser-indicator.online .dot{background:#13a873}
+.cpi-agent-actions{display:flex;flex:1;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.cpi-agent-message{border-radius:8px;padding:11px 13px;background:#f2f7fd;color:#35516d;font-size:11px;line-height:1.5;margin-top:10px}
+.cpi-agent-message.error{background:#fef2f2;color:#9c3434}
+.cpi-history-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.cpi-history-table{border:1px solid var(--line);border-radius:9px;overflow:auto;max-height:440px}
+.cpi-history-table table{width:100%;min-width:690px;border-collapse:collapse;font-size:11px}
+.cpi-history-table th{text-align:left;background:#f4f8fd;color:#3c5876;font-size:10px;font-weight:800;letter-spacing:.03em;padding:13px 14px;white-space:nowrap;position:sticky;top:0}
+.cpi-history-table td{padding:11px 14px;border-top:1px solid #e7edf5;color:#364e6b}
+.cpi-history-table .cpi-id{font-weight:750;font-variant-numeric:tabular-nums;color:#1f4063}
+.cpi-history-table .secondary{min-height:32px}
+.cpi-classification{display:inline-block;padding:5px 8px;border-radius:6px;white-space:nowrap;background:#edf5fd;color:#245f9e;font-size:10px;font-weight:720}
+.cpi-classification.restrictions{background:#fff1ef;color:#b44338}
+.cpi-empty-history{text-align:center;padding:30px 14px!important;color:#8c9bad!important}
+.cpi-review-notice{color:#a15e2c}
+@media(max-width:1250px){.cpi-dashboard-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:720px){.cpi-dashboard-grid{grid-template-columns:minmax(0,1fr)}.cpi-agent-actions{justify-content:flex-start}.cpi-agent-toolbar{align-items:stretch}.cpi-history-table{max-width:100%}}

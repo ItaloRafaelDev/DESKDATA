@@ -2,7 +2,8 @@ import { StrictMode, useCallback, useEffect, useRef, useState, type FormEvent } 
 import { createRoot } from 'react-dom/client';
 import { cnpjDigits, formatCnpj, isValidCnpj } from '../shared/cnpj.ts';
 import { cpfDigits, formatCpf, isValidCpf } from '../shared/cpf.ts';
-import type { AppSettings, QueryOutcome, HistoryEntry, QueryExecution, PisQueryExecution, MaintenancePreview } from '../shared/types.ts';
+import { CPI_MIN_INTERVAL_SECONDS, CPI_MAX_INTERVAL_SECONDS, parseCpiMonitorIntervalInput, getCpiRemainingSeconds, formatCpiCountdown } from '../shared/cpi-monitor-time.ts';
+import type { AppSettings, QueryOutcome, HistoryEntry, QueryExecution, PisQueryExecution, MaintenancePreview, CpiBrowserStatus, CpiHistoryOverview, CpiPendingRowId, CpiAutoSnapshot } from '../shared/types.ts';
 import { loadRememberedLogin } from './ux.ts';
 import { Icon, ToastHost, type Notification } from './ui.tsx';
 import './styles.css';
@@ -11,7 +12,7 @@ const DATASET_LABELS=['Dados básicos','Telefones','Endereços','E-mails','Proce
 const defaultSettings:AppSettings={outputFolder:null,paidQueriesApproved:false};
 function reportFilename(path:string):string { return path.split(/[\\/]/).pop() ?? path; }
 function App(){
-  const [tab,setTab]=useState<'acesso'|'consultar'|'pis'|'company'|'configurar'>('acesso');
+  const [tab,setTab]=useState<'acesso'|'consultar'|'pis'|'company'|'cpi'|'configurar'>('acesso');
   const [settings,setSettings]=useState<AppSettings>(defaultSettings);
   const [username,setUsername]=useState('');
   const [password,setPassword]=useState('');
@@ -25,6 +26,11 @@ function App(){
   const [companyEntries,setCompanyEntries]=useState<HistoryEntry[]>([]);
   const [pisEntries,setPisEntries]=useState<HistoryEntry[]>([]);
   const [busy,setBusy]=useState(false);
+  const [cpiStatus,setCpiStatus]=useState<CpiBrowserStatus>({state:'closed'});
+  const [cpiAuto,setCpiAuto]=useState<CpiAutoSnapshot|null>(null);
+  const [cpiHistory,setCpiHistory]=useState<CpiHistoryOverview|null>(null);
+  const [cpiIntervalInput,setCpiIntervalInput]=useState('60');
+  const [cpiClockMs,setCpiClockMs]=useState(()=>Date.now());
   const [notice,setNotice]=useState<Notification|null>(null);
   const nextNoticeId=useRef(0);
   const credentialsEdited=useRef(false);
@@ -178,7 +184,7 @@ function App(){
     setLast(result);setHasReport(true);setCanReprocess(false);await refreshHistory();
     show(`Resposta reprocessada sem nova consulta: ${reportFilename(result.path)}`,'success');
   });}
-  function logout(){void run(async()=>{await window.deskdata.logout();setTab('acesso');setLogged(false);setCreditBalance(null);setLast(null);setHasReport(false);setCanReprocess(false);setHistoryEntries([]);setPisEntries([]);setCompanyEntries([]);setSettings(current=>({...current,paidQueriesApproved:false}));show('Sessão encerrada.','success');});}
+  function logout(){void run(async()=>{await window.deskdata.logout();setTab('acesso');setLogged(false);setCreditBalance(null);setLast(null);setHasReport(false);setCanReprocess(false);setHistoryEntries([]);setPisEntries([]);setCompanyEntries([]);setCpiStatus({state:'closed'});setCpiHistory(null);setCpiAuto(null);setSettings(current=>({...current,paidQueriesApproved:false}));show('Sessão encerrada.','success');});}
   function recover(event:FormEvent){event.preventDefault();void run(async()=>{
     const result=await window.deskdata.recoverByCode(cpfDigits(cpf),recoveryCode.trim().toUpperCase());
     showExecution(result,'CPF');
@@ -228,9 +234,68 @@ function App(){
     showExecution(result,'CNPJ');
     await refreshHistory();
   });}
+  async function openCpi(){await run(async()=>{
+    setCpiStatus(await window.deskdata.cpiOpen());
+    show('Janela CPI aberta. Autentique-se no portal e inicie o agente.','info');
+  });}
+  async function startFullCpi(){await run(async()=>{
+    const interval=parseCpiMonitorIntervalInput(cpiIntervalInput);
+    if(interval===null)throw new Error('Informe um intervalo válido entre 30 e 86400 segundos.');
+    if(!settings.paidQueriesApproved)throw new Error('Autorize novas consultas em Minha conta antes de iniciar.');
+    if(!window.confirm('INICIAR AGENTE CPI?\n\nO agente poderá realizar consultas pagas enquanto houver créditos Deskdata, classificar processos, gerar PDFs e salvar respostas na CPI. Não existe limite local de quantidade. Continuará uma pesquisa por vez; erros e estados incertos interrompem o processamento. Confirmar?'))return;
+    setCpiAuto(await window.deskdata.cpiAutoStart(interval));
+    show('Agente CPI iniciado. O saldo é verificado antes de cada nova consulta paga.','success');
+  });}
+  async function pauseFullCpi(){await run(async()=>{
+    setCpiAuto(await window.deskdata.cpiAutoPause());
+    show('Pausa solicitada. A operação em andamento será concluída antes de parar.','info');
+    setCpiHistory(await window.deskdata.cpiHistory());
+  });}
+  async function closeCpi(){await run(async()=>{
+    await window.deskdata.cpiClose();setCpiStatus({state:'closed'});
+    show('Navegador CPI encerrado.','info');
+  });}
+  async function refreshCpiHistory(){await run(async()=>{
+    setCpiHistory(await window.deskdata.cpiHistory());
+    try{setCreditBalance(await window.deskdata.credits());}
+    catch{setCreditBalance(null);}
+  });}
+  async function openCpiHistoryPdf(ids:CpiPendingRowId){await run(()=>window.deskdata.cpiOpenHistoryPdf(ids));}
+  useEffect(()=>{
+    if(!logged || tab!=='cpi')return;
+    let active=true;
+    const refresh=()=>{
+      void window.deskdata.cpiHistory().then(v=>{if(active)setCpiHistory(v);}).catch(()=>{});
+      void window.deskdata.credits().then(v=>{if(active)setCreditBalance(v);}).catch(()=>{if(active)setCreditBalance(null);});
+    };
+    void window.deskdata.cpiStatus().then(v=>{if(active)setCpiStatus(v);}).catch(()=>{});
+    void window.deskdata.cpiAutoStatus().then(v=>{if(active)setCpiAuto(v);}).catch(()=>{});
+    refresh();
+    const unsubscribe=window.deskdata.subscribeCpiAuto(v=>{if(active)setCpiAuto(v);});
+    const statusTimer=window.setInterval(()=>{
+      void window.deskdata.cpiStatus().then(v=>{if(active)setCpiStatus(v);}).catch(()=>{});
+    },5000);
+    return ()=>{active=false;unsubscribe();window.clearInterval(statusTimer);};
+  },[logged,tab]);
+  useEffect(()=>{
+    if(!logged || tab!=='cpi')return;
+    void window.deskdata.cpiHistory().then(setCpiHistory).catch(()=>{});
+    if(cpiAuto?.processed){void window.deskdata.credits().then(setCreditBalance).catch(()=>setCreditBalance(null));}
+  },[logged,tab,cpiAuto?.processed]);
+  useEffect(()=>{
+    if(!logged||tab!=='cpi'||cpiAuto?.phase!=='waiting'||!cpiAuto.nextCheckAt)return;
+    setCpiClockMs(Date.now());
+    const timer=window.setInterval(()=>setCpiClockMs(Date.now()),1000);
+    return ()=>window.clearInterval(timer);
+  },[logged,tab,cpiAuto?.phase,cpiAuto?.nextCheckAt]);
   async function openHistory(recordId:string,path:string){
     await run(()=>window.deskdata.openHistoryPdf(recordId,path));
   }
+  const cpiBrowserOpen=cpiStatus.state==='open';
+  const cpiAutoRunning=cpiAuto?.phase==='running'||cpiAuto?.phase==='waiting';
+  const cpiValidInterval=parseCpiMonitorIntervalInput(cpiIntervalInput);
+  const cpiCountdown=cpiAuto?.phase==='waiting'
+    ? getCpiRemainingSeconds(cpiAuto.nextCheckAt,cpiClockMs):null;
   if(!logged)return <div className="auth-page">
     <div className="auth-identity"><div className="brandmark">D</div><div><strong>DESKDATA</strong><small>RELATÓRIOS</small></div></div>
     <section className="auth-card" aria-labelledby="auth-title">
@@ -248,8 +313,8 @@ function App(){
     <p className="auth-footnote">O sistema não inicia consultas sem sua autorização.</p>
     <ToastHost notice={notice} onDismiss={dismissNotice}/>
   </div>;
-  return <div className="shell"><aside className="sidebar"><div className="brand"><div className="brandmark">D</div><div><strong>DESKDATA</strong><small>RELATÓRIOS</small></div></div><p className="side-label">ÁREA DE TRABALHO</p><button type="button" className={`nav ${tab==='acesso'?'active':''}`} onClick={()=>setTab('acesso')}><Icon name="user" size={18}/> Minha conta</button><button type="button" className={`nav ${tab==='consultar'?'active':''}`} onClick={()=>setTab('consultar')}><Icon name="file" size={18}/> Consultar pessoa</button><button type="button" className={`nav ${tab==='pis'?'active':''}`} onClick={()=>setTab('pis')}><Icon name="id" size={18}/> Consultar PIS</button><button type="button" className={`nav ${tab==='company'?'active':''}`} onClick={()=>setTab('company')}><Icon name="building" size={18}/> Consultar CNPJ</button><button type="button" className={`nav ${tab==='configurar'?'active':''}`} onClick={()=>setTab('configurar')}><Icon name="settings" size={18}/> Configurações</button><div className="sidebar-footer">Modelo 01 — Executivo<br/><span>Ambiente de desenvolvimento</span></div></aside>
-  <div className="workspace"><header className="topbar"><span>DESKDATA / {tab==='consultar'?'Consulta de pessoas':tab==='pis'?'Consulta de PIS':tab==='company'?'Consulta de CNPJ':tab==='acesso'?'Minha conta':'Configurações'}</span><span className={`session ${logged?'online':''}`}><span className="dot"/>{logged?'Conectado':'Não autenticado'}</span></header><main className="main">
+  return <div className="shell"><aside className="sidebar"><div className="brand"><div className="brandmark">D</div><div><strong>DESKDATA</strong><small>RELATÓRIOS</small></div></div><p className="side-label">ÁREA DE TRABALHO</p><button type="button" className={`nav ${tab==='acesso'?'active':''}`} onClick={()=>setTab('acesso')}><Icon name="user" size={18}/> Minha conta</button><button type="button" className={`nav ${tab==='consultar'?'active':''}`} onClick={()=>setTab('consultar')}><Icon name="file" size={18}/> Consultar pessoa</button><button type="button" className={`nav ${tab==='pis'?'active':''}`} onClick={()=>setTab('pis')}><Icon name="id" size={18}/> Consultar PIS</button><button type="button" className={`nav ${tab==='company'?'active':''}`} onClick={()=>setTab('company')}><Icon name="building" size={18}/> Consultar CNPJ</button><button type="button" className={`nav ${tab==='cpi'?'active':''}`} onClick={()=>setTab('cpi')}><Icon name="refresh" size={18}/> Automação CPI</button><button type="button" className={`nav ${tab==='configurar'?'active':''}`} onClick={()=>setTab('configurar')}><Icon name="settings" size={18}/> Configurações</button><div className="sidebar-footer">Modelo 01 — Executivo<br/><span>Ambiente de desenvolvimento</span></div></aside>
+  <div className="workspace"><header className="topbar"><span>DESKDATA / {tab==='consultar'?'Consulta de pessoas':tab==='pis'?'Consulta de PIS':tab==='company'?'Consulta de CNPJ':tab==='cpi'?'Automação CPI':tab==='acesso'?'Minha conta':'Configurações'}</span><span className={`session ${logged?'online':''}`}><span className="dot"/>{logged?'Conectado':'Não autenticado'}</span></header><main className="main">
   {tab==='consultar'?<><div className="page-heading"><div><p className="eyebrow">CONSULTAS AUTOMATIZADAS</p><h1>Consultar pessoa</h1><p>Informe o CPF. Os dados serão consultados e transformados em PDF automaticamente.</p></div><span className="pill">Modelo 01 · A4</span></div>
   <div className="single-column">
   <section className="panel"><div className="panel-heading"><h2>Consulta e PDF</h2><p>Um CPF por consulta, cinco conjuntos fixos.</p></div><form className="form" onSubmit={query}><label>CPF da pessoa consultada<input inputMode="numeric" autoComplete="off" placeholder="000.000.000-00" maxLength={14} value={cpf} onChange={e=>setCpf(formatCpf(cpfDigits(e.target.value).slice(0,11)))} disabled={busy}/></label><div className="chips">{DATASET_LABELS.map(label=><span key={label} className="chip">{label}</span>)}</div><button className="primary large" type="submit" disabled={busy||!logged||!isValidCpf(cpf)||!settings.outputFolder}>{busy?'Processando...':'Consultar e gerar PDF'}</button>{!settings.outputFolder||!settings.paidQueriesApproved?<p className="hint">Defina a pasta em Configurações. Autorize novas consultas em Minha conta.</p>:null}</form><details className="code-recovery"><summary>Recuperar consulta pelo código Q-...</summary><form onSubmit={recover} className="recovery-form"><label htmlFor="query-code">Código de uma consulta existente</label><input id="query-code" placeholder="Q-ABC123DEF4" value={recoveryCode} maxLength={12} onChange={e=>setRecoveryCode(e.target.value.toUpperCase())} disabled={busy}/><button className="secondary" disabled={!logged||busy||!isValidCpf(cpf)||!/^Q-[A-F0-9]{10}$/.test(recoveryCode)} type="submit">Recuperar resultado (GET)</button></form><p className="hint">Utiliza o CPF informado acima e um código conhecido. Não cria nova consulta.</p></details></section></div>
@@ -304,6 +369,42 @@ function App(){
     </div>
     <div className="actions"><button className="secondary" disabled={busy||!settings.outputFolder} onClick={()=>void run(()=>window.deskdata.openFolder())}>Abrir pasta</button></div>
   </section>
+  </>:tab==='cpi'?<>
+    <div className="page-heading cpi-dashboard-heading"><div><p className="eyebrow">OPERAÇÃO AUTOMÁTICA · PESQUISA 29</p><h1>Agente CPI Central</h1><p>Monitore as consultas, os relatórios e as respostas enviadas à CPI em um único lugar.</p></div><span className="pill">Consultar pessoa · FULL AUTO</span></div>
+    <div className="cpi-dashboard-grid" role="group" aria-label="Indicadores do agente">
+      <div className="cpi-kpi"><span>Estado do agente</span><strong className={`cpi-state ${cpiAuto?.phase??'stopped'}`}>{({running:'Processando',waiting:'Em espera',paused:'Pausado',error:'Falha',stopped:'Parado'})[cpiAuto?.phase??'stopped']}</strong><small>{cpiAuto?.phase==='waiting'?'Monitoramento ativo':cpiAuto?.phase==='error'?'Intervenção necessária':'Pesquisa 29'}</small></div>
+      <div className="cpi-kpi"><span>Respondidas no histórico</span><strong>{cpiHistory?.completedCount??'—'}</strong><small>Registros confirmados nesta conta</small></div>
+      <div className="cpi-kpi"><span>Necessitam revisão</span><strong>{cpiHistory?.reviewCount??'—'}</strong><small>Sem reenvio automático</small></div>
+      <div className="cpi-kpi"><span>Créditos Deskdata</span><strong>{creditBalance===null?'Indisponível':creditBalance.toLocaleString('pt-BR')}</strong><small>Saldo consultado na API</small></div>
+    </div>
+    <section className="panel cpi-dashboard-panel" aria-labelledby="cpi-operation-title">
+      <div className="panel-heading"><h2 id="cpi-operation-title">Operação do agente</h2><p>Uma solicitação por vez, reaproveitando o histórico. Novas consultas pagas continuam enquanto houver saldo disponível e autorização da conta.</p></div>
+      <div className="cpi-agent-toolbar">
+        <span className={`cpi-browser-indicator${cpiBrowserOpen?' online':''}`}><span className="dot"/>{cpiBrowserOpen?'CPI conectada':'CPI desconectada'}</span>
+        <label className="cpi-interval" htmlFor="cpi-agent-interval">Verificar a cada (segundos)<input id="cpi-agent-interval" type="number" min={CPI_MIN_INTERVAL_SECONDS} max={CPI_MAX_INTERVAL_SECONDS} step={1} inputMode="numeric" value={cpiIntervalInput} onChange={event=>setCpiIntervalInput(event.target.value)} disabled={busy||cpiAutoRunning} aria-invalid={cpiValidInterval===null}/></label>
+        <div className="cpi-agent-actions">
+          <button type="button" className="secondary" onClick={()=>void openCpi()} disabled={busy||cpiBrowserOpen}>Abrir CPI no Edge</button>
+          <button type="button" className="primary" disabled={busy||!cpiBrowserOpen||cpiAutoRunning||cpiValidInterval===null||!settings.paidQueriesApproved} onClick={()=>void startFullCpi()}>Iniciar agente</button>
+          <button type="button" className="secondary" disabled={busy||!cpiAutoRunning} onClick={()=>void pauseFullCpi()}>Pausar</button>
+          <button type="button" className="secondary" disabled={busy||!cpiBrowserOpen||cpiAutoRunning} onClick={()=>void closeCpi()}>Fechar Edge</button>
+        </div>
+      </div>
+      {!settings.paidQueriesApproved?<p className="hint" role="status">Autorize o consumo de créditos em <strong>Minha conta</strong> para iniciar o agente. A confirmação de início continua obrigatória.</p>:null}
+      {cpiAuto?.phase==='waiting'&&cpiCountdown!==null?<p className="cpi-countdown" role="timer" aria-live="off">Próxima verificação em <strong>{formatCpiCountdown(cpiCountdown)}</strong></p>:null}
+      {cpiAuto?.lastMessage?<div className={`cpi-agent-message${cpiAuto.phase==='error'?' error':''}`} role="status">{cpiAuto.lastMessage}</div>:null}
+      <p className="hint">Ciclos nesta sessão: {cpiAuto?.checks??0} · Concluídas nesta sessão: {cpiAuto?.processed??0}. Sem teto local de consultas; saldo zerado ou insuficiente, erro de identificação e salvamento incerto suspendem novos envios. Não há repetição automática de POST ou anexo.</p>
+    </section>
+    <section className="panel cpi-dashboard-panel" aria-labelledby="cpi-history-title">
+      <div className="cpi-history-heading"><div className="panel-heading"><h2 id="cpi-history-title">Histórico de respostas na CPI</h2><p>Somente pesquisas concluídas pelo agente e vinculadas à conta autenticada. Os dados permanecem protegidos no computador.</p></div><button type="button" className="secondary" disabled={busy} onClick={()=>void refreshCpiHistory()}>Atualizar histórico</button></div>
+      <div className="cpi-history-table" role="region" aria-label="Solicitações respondidas na CPI" tabIndex={0}>
+        <table><thead><tr><th>Pesquisa</th><th>Solicitação</th><th>Resultado</th><th>Respondida em</th><th>Relatório</th></tr></thead><tbody>
+        {cpiHistory?.items.map(item=><tr key={`${item.pesquisaId}-${item.solicitacaoId}`}><td className="cpi-id">{item.pesquisaId}</td><td className="cpi-id">{item.solicitacaoId}</td><td><span className={`cpi-classification ${item.classification}`}>{item.classification==='restrictions'?'Sim, Consta Restrições':'Há Informações'}</span></td><td>{new Date(item.answeredAt).toLocaleString('pt-BR')}</td><td><button type="button" className="secondary" disabled={busy||!item.pdfAvailable} onClick={()=>void openCpiHistoryPdf(item)}>{item.pdfAvailable?'Abrir PDF':'Indisponível'}</button></td></tr>)}
+        {!cpiHistory?.items.length?<tr><td colSpan={5} className="cpi-empty-history">Nenhuma pesquisa concluída pelo agente nesta conta.</td></tr>:null}
+        </tbody></table>
+      </div>
+      {cpiHistory&&cpiHistory.completedCount>cpiHistory.items.length?<p className="hint">Exibindo as {cpiHistory.items.length} respostas mais recentes de {cpiHistory.completedCount} registros.</p>:null}
+      {cpiHistory?.reviewCount?<p className="hint cpi-review-notice">Existem {cpiHistory.reviewCount} solicitações que exigem conferência antes de qualquer reprocessamento. O agente não realizará envios duplicados.</p>:null}
+    </section>
   </>:tab==='configurar'?<><div className="page-heading"><div><p className="eyebrow">PREFERÊNCIAS LOCAIS</p><h1>Configurações</h1><p>Defina estas opções uma vez. Não será necessário selecioná-las em cada consulta.</p></div></div><section className="panel settings-panel"><div className="panel-heading"><h2>Pasta de saída dos PDFs</h2><p>Os relatórios serão salvos automaticamente na pasta selecionada.</p></div><div className="folder"><span>{settings.outputFolder??'Nenhuma pasta selecionada'}</span><button type="button" className="secondary" disabled={busy} onClick={()=>void folder()}>Selecionar pasta</button></div><div className="divider"/><div className="panel-heading"><h2>Backup do histórico</h2><p>Crie uma cópia ZIP dos registros cifrados, da chave protegida e das configurações essenciais. Não inclui senhas nem PDFs.</p></div>
     <div className="backup-actions"><button type="button" className="primary" disabled={busy} onClick={()=>void createBackup()}><Icon name="file" size={17}/> Criar backup ZIP</button><button type="button" className="secondary" disabled={busy} onClick={()=>void openBackupFolder()}><Icon name="folder" size={17}/> Abrir pasta de backups</button></div>
     {backupInfo?<p className="hint backup-path" title={backupInfo}>Último backup: {backupInfo}</p>:null}
