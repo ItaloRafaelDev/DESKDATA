@@ -27,6 +27,8 @@ Todo texto exibido ao usuário, mensagens de erro e documentação ficam em **po
   (`person-rules.ts`) → PDF → anexar e salvar → confirmar (`response-confirmation.ts`). O progresso fica cifrado em
   `workflow-store.ts`, com os estágios `claimed → query_started → query_pending → pdf_ready → submit_started → completed`,
   ou `verification_required` / `review_required`. Leia o documento correspondente em `docs/` antes de alterar a CPI.
+  O FULL AUTO (`full-auto-runner.ts`) roda enquanto houver pesquisas: `queue-selection.ts` nunca reabre itens finais
+  ou em revisão; `failure-classes.ts` decide entre parada imediata (D1) e revisão do item (3 seguidas da mesma classe pausam).
 - **Criptografia:** `credentials.ts` abstrai o `safeStorage` (DPAPI) em `CredentialProtector`; os stores são testados
   com um protetor falso.
 - **Diagnóstico de tempo:** `step-timing.ts` mede etapas com um `correlationId` por ciclo; só nomes fixos de etapa

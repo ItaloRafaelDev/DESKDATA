@@ -28,7 +28,7 @@ for(const mode of ['unverified','exception','not_submitted','submit_started']){
         beginHistory:async()=>{throw Error('Novo histórico indevido');},setQueryCode:async()=>{throw Error('POST indevido');},
         paidApproved:async()=>{throw Error('Nova autorização indevida');},getCredits:async()=>{throw Error('Consulta indevida');},
         verifyPaidBalance:async()=>{throw Error('Consulta indevida');},submitCpf:async()=>{throw Error('POST indevido');},
-        fetchByCode:async()=>({queryCode:record.queryCode,payload:{status:{code:4000},data:{basic:{tax_id:{number:cpf}},
+        checkByCode:async()=>({state:'ready',queryCode:record.queryCode,payload:{status:{code:4000},data:{basic:{tax_id:{number:cpf}},
           phones:{items:[]},emails:{items:[]},addresses:{items:[]},lawsuits:{items:[{court_type:'Criminal'}]}}}}),
         // Etapa 4: gerar outro PDF do mesmo snapshot; nunca sobrescrever o legado.
         savePdf:async(document,id,queryCode,data)=>{
@@ -51,7 +51,7 @@ for(const mode of ['unverified','exception','not_submitted','submit_started']){
       const priorUploads=uploads,priorOpens=opens;
       store=new CpiWorkflowStore(dir,protector);
       s.getCpf=async()=>{throw Error('Não reabrir pesquisa potencialmente respondida');};
-      const runner=new CpiFullAutoRunner(async()=>({found:1,outcomes:[await executeCpiPersonCycle(s)]}));
+      const runner=new CpiFullAutoRunner(async()=>({kind:'item',found:1,outcome:await executeCpiPersonCycle(s)}));
       await runner.start(30);await runner.pause();
       assert.equal(runner.status().phase,'paused');
       assert.equal((await executeCpiPersonCycle(s)).state,'review_required');

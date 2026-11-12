@@ -66,6 +66,9 @@ export async function withMainProcess(submitCpf,run,options={}){
       async close(){} status(){return {state:options.cpiOpen?'open':'closed'};}
       async filterPendingPerson29(){return options.filter?options.filter():{state:'empty',total:0,typeId:'29'};}
       async inspectPersistedPersonResponse(...args){return options.inspectPersisted?options.inspectPersisted(...args):'unavailable';}
+      async inspectPendingRows(){return options.rows?options.rows():{state:'empty',total:0,visibleRows:0,rows:[],framesInspected:0,message:''};}
+      async inspectPendingPersonDetails(ids){return options.details?options.details(ids):undefined;}
+      readValidatedCpf(ids){if(options.readCpf)return options.readCpf(ids);throw new Error('CPF ausente ou inválido no formulário da CPI.');}
     }},
     './pending-queries.ts':{PendingQueryMonitor:class {
       tasks=new Set();stopAll(){this.tasks.clear();}isWatching(id){return this.tasks.has(id);}watch(target){events.push('query_watch');this.tasks.add(target.id);}

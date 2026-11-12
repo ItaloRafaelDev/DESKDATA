@@ -24,7 +24,7 @@ function services(overrides={}){
     setQueryCode:async(_id,code)=>{record.queryCode=code;},
     getCredits:async()=>10,verifyPaidBalance:async()=>events.push('reserved'),paidApproved:async()=>true,
     submitCpf:async()=>({state:'ready',queryCode:'Q-AAAAAAAAAA',payload:data}),
-    fetchByCode:async()=>({queryCode:'Q-AAAAAAAAAA',payload:data}),
+    checkByCode:async()=>({state:'ready',queryCode:'Q-AAAAAAAAAA',payload:data}),
     savePdf:async()=>{record.status='ready';},
     uploadAndSave:async()=>('confirmed'),
     closeCompletedDetail:async()=>events.push('closed_detail'),
@@ -32,10 +32,22 @@ function services(overrides={}){
   };
   return {s,events,setRecord:r=>{record=r;}};
 }
-test('sem aprovação não executa POST, reserva ou envio',async()=>{
+// E2 (D1): falta de autorização é condição sistêmica; o ciclo lança erro (o agente pausa) em vez de
+// devolver review_required sem marcar o item, o que faria o FULL AUTO contínuo reabri-lo a cada ciclo.
+test('sem aprovação não executa POST, reserva ou envio e pausa o agente sem marcar o item',async()=>{
   const {s,events}=services({paidApproved:async()=>false,submitCpf:async()=>{throw Error('POST indevido');}});
+  await assert.rejects(executeCpiPersonCycle(s),/Autorize novas consultas/);
+  assert.deepEqual(events,[]);
+});
+test('E2: GET por código ainda em processamento devolve pending sem polling, POST, PDF ou envio',async()=>{
+  let gets=0;
+  const {s,events,setRecord}=services({checkByCode:async()=>{gets++;return {state:'pending',queryCode:'Q-AAAAAAAAAA'};},
+    submitCpf:async()=>{throw Error('POST indevido');},getCredits:async()=>{throw Error('Saldo indevido');},
+    savePdf:async()=>{throw Error('PDF indevido');},uploadAndSave:async()=>{throw Error('Envio indevido');}});
+  setRecord({id:'123e4567-e89b-12d3-a456-426614174000',kind:'person',cpf:CPF,account:s.account,status:'pending',queryCode:'Q-AAAAAAAAAA',pdfPaths:[]});
   const result=await executeCpiPersonCycle(s);
-  assert.equal(result.state,'review_required');assert.deepEqual(events,[]);
+  assert.equal(result.state,'pending');assert.equal(gets,1);
+  assert.deepEqual(events,['query_pending']);
 });
 test('reserva orçamento antes do primeiro POST e não repete com histórico existente',async()=>{
   const {s,events}=services();
@@ -118,7 +130,7 @@ test('PDF legado não é enviado: o ciclo regera o PDF CPI por GET, sem novo POS
     let fetched=0,uploaded=null;
     const {s,setRecord}=services({outputFolder:dir,
       submitCpf:async()=>{throw Error('POST indevido');},getCredits:async()=>{throw Error('Saldo indevido');},
-      fetchByCode:async()=>{fetched++;return {queryCode:'Q-AAAAAAAAAA',payload:data};},
+      checkByCode:async()=>{fetched++;return {state:'ready',queryCode:'Q-AAAAAAAAAA',payload:data};},
       savePdf:async cpf=>{await writeFile(fresh,'%PDF-1.4\n'+'x'.repeat(150));const r=await s.findLatest(cpf);r.pdfPaths.push(fresh);},
       uploadAndSave:async path=>{uploaded=path;return 'confirmed';}});
     setRecord({id:'123e4567-e89b-12d3-a456-426614174000',kind:'person',cpf:CPF,account:s.account,status:'ready',queryCode:'Q-AAAAAAAAAA',pdfPaths:[legacy]});

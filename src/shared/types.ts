@@ -72,9 +72,17 @@ export interface CpiPendingWorkflowItem extends CpiPendingRowId {
 }
 export interface CpiPendingWorkflowPage {total:number;page:number;pageSize:number;items:CpiPendingWorkflowItem[]}
 export interface CpiWorkflowVerificationResult {stage:CpiPendingWorkflowStage|'completed';reason:CpiVerificationReason;checkedAt:string}
+/** Estado do FULL AUTO para a interface: somente códigos CPI, contadores e durações (nunca CPF). */
 export interface CpiAutoSnapshot {
   phase:'stopped'|'running'|'waiting'|'paused'|'error';
-  checks:number;processed:number;lastMessage:string;nextCheckAt:string|null;intervalSeconds:number;
+  checks:number;lastMessage:string;nextCheckAt:string|null;
+  /** Teto da espera com fila vazia, em segundos (não limita a quantidade de itens). */
+  intervalSeconds:number;
+  currentItem:CpiPendingRowId|null;
+  cycleStartedAt:string|null;
+  lastCycleMs:number|null;
+  counters:{completed:number;review:number;failures:number;pending:number};
+  failureStreak:{kind:string;count:number}|null;
 }
 export interface CpiMonitorSnapshot {
   phase: 'stopped'|'checking'|'waiting'|'paused'|'needs_mapping'|'error';

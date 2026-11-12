@@ -19,6 +19,14 @@ export function getCpiRemainingSeconds(nextCheckAt: string | null, nowMs: number
   return Math.max(0, Math.ceil((targetMs - nowMs) / 1000));
 }
 
+/** Duração do ciclo em andamento, a partir do início publicado pelo processo principal. */
+export function getCpiElapsedSeconds(startedAt: string | null, nowMs: number): number | null {
+  if (!startedAt || !Number.isFinite(nowMs)) return null;
+  const startMs = Date.parse(startedAt);
+  if (!Number.isFinite(startMs)) return null;
+  return Math.max(0, Math.floor((nowMs - startMs) / 1000));
+}
+
 export function formatCpiCountdown(seconds: number | null): string {
   if (seconds === null || !Number.isSafeInteger(seconds) || seconds < 0) return '--:--';
   const hours = Math.floor(seconds / 3600);

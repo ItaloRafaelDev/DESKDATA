@@ -26,7 +26,8 @@ export interface FullCycleServices {
   verifyPaidBalance(credits:number):Promise<void>;
   paidApproved():Promise<boolean>;
   submitCpf(cpf:string,callback:(code:string)=>Promise<void>):Promise<{state:'pending';queryCode:string}|{state:'ready';queryCode?:string;payload:unknown}>;
-  fetchByCode(code:string):Promise<{payload:unknown;queryCode:string}>;
+  /** Um único GET por ciclo (sem polling): 202 devolve 'pending' e o item é retomado depois, sem novo POST. */
+  checkByCode(code:string):Promise<{state:'pending';queryCode:string}|{state:'ready';queryCode:string;payload:unknown}>;
   /** Grava o PDF CPI (CPI_<pesquisaId>_<solicitacaoId>_<data>.pdf) e o registra na consulta. */
   savePdf(cpf:string,recordId:string,queryCode:string|undefined,data:NormalizedData):Promise<void>;
   uploadAndSave(pdfPath:string,classification:'restrictions'|'information'):Promise<'confirmed'|'confirmed_auxiliary_404'|'unverified'|'not_submitted'>;
@@ -61,7 +62,8 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
       await s.mark('review_required');
       return outcome(s,'review_required','Há tentativa anterior sem histórico recuperável. Não repetir POST.');
     }
-    if(!await s.paidApproved())return outcome(s,'review_required','Autorização Deskdata necessária para nova consulta.');
+    // Condição sistêmica (D1): sem autorização nenhuma pesquisa nova avança; o agente pausa sem marcar o item.
+    if(!await s.paidApproved())throw new Error('Autorize novas consultas Deskdata para esta conta em Minha conta.');
     // O saldo e a aprovação são conferidos antes de criar o histórico e enviar POST.
     // O próprio status query_started impede repetir o POST se a rede falhar.
     await timer.step('deskdata_credits',async()=>s.verifyPaidBalance(await s.getCredits()));
@@ -89,7 +91,8 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
     }
     await s.mark('query_pending',{historyRecordId:record.id});
     const code=queryCode;
-    const received=await timer.step('deskdata_fetch',()=>s.fetchByCode(code));
+    const received=await timer.step('deskdata_fetch',()=>s.checkByCode(code));
+    if(received.state==='pending')return outcome(s,'pending','Consulta Deskdata ainda em processamento; será retomada por GET, sem novo POST.');
     payload=received.payload;
   }
   assertRecoveredCpf(payload,cpf);
