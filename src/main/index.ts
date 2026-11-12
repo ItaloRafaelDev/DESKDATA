@@ -145,6 +145,10 @@ function bind<T extends unknown[]>(channel:string,operation:(...args:T)=>Promise
     guard(event);
     const began=performance.now();
     try {
+      if(channel==='cpi:close'||channel==='auth:logout'){
+        operations.assertAccepting();
+        await cpiAuto.pause();
+      }
       const result=await operations.run(()=>operation(...(args as T)),exclusiveChannels.has(channel));
       void diagnostics?.write('ipc_success',{channel,durationMs:performance.now()-began}).catch(()=>{});
       return result;
