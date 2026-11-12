@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findCpiPersonPdf } from '../src/main/cpi/person-pdf.ts';
@@ -8,7 +8,7 @@ import { findCpiPersonPdf } from '../src/main/cpi/person-pdf.ts';
 const cpf='52998224725';
 const pdfData=Buffer.concat([Buffer.from('%PDF-1.7\n'),Buffer.alloc(256,65)]);
 function record(paths,overrides={}){return {id:'123',kind:'person',account:'a@example.com',cpf,requestedAt:'2026-11-04',updatedAt:'2026-11-04',status:'ready',pdfPaths:paths,...overrides};}
-async function withTemp(callback){const root=await mkdtemp(join(tmpdir(),'deskdata-cpi-pdf-'));try{await callback(root);}finally{await rm(root,{force:true,recursive:true});}}
+async function withTemp(callback){const root=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-pdf-')));try{await callback(root);}finally{await rm(root,{force:true,recursive:true});}}
 test('CPI: PDF registrado, com nome/CPF correspondente e assinatura válida',()=>withTemp(async root=>{
  const path=join(root,`RELATORIO_${cpf}_2026-11-04.pdf`);await writeFile(path,pdfData);
  assert.equal(await findCpiPersonPdf(record([path]),cpf,root),path);

@@ -73,6 +73,6 @@
     "publish": null
   },
   "engines": {
-    "node": ">=22.12"
+    "node": ">=24"
   }
 }
