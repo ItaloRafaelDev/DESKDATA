@@ -11,6 +11,7 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 
 ### Corrigido
 - Testes CPI comparavam caminhos temporários não canônicos; falhavam no runner Windows (TEMP com nome 8.3).
+- Erros de lint (causa preservada em erros relançados, imports e variáveis sem uso).
 
 ### Removido
 - Arquivos do pnpm (`pnpm-lock.yaml`, `pnpm-workspace.yaml`); o projeto usa somente npm.
@@ -18,4 +19,4 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 - Artefatos locais versionados por engano (CLAUDE.md, lote.diff, testes-removidos.txt).
 
 ### Inalterado
-- Nenhuma alteração em src/; em tests/, somente a canonicalização dos diretórios temporários.
+- Comportamento do aplicativo preservado.

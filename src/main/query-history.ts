@@ -77,12 +77,12 @@ export class QueryHistoryStore {
     if(priorInitialization&&!databaseExists)throw Error('Banco de consultas ausente. Restaure o backup; nenhuma consulta será executada.');
     let encrypted:Buffer;
     try{encrypted=await readFile(keyFile);}catch(e){
-      if((e as NodeJS.ErrnoException).code!=='ENOENT')throw Error('Chave protegida do histórico inacessível.');
+      if((e as NodeJS.ErrnoException).code!=='ENOENT')throw Error('Chave protegida do histórico inacessível.',{cause:e});
       // Um banco existente sem sua chave não pode ser reaberto com uma nova chave silenciosamente.
       const existingDb=await access(join(this.directory,'queries.sqlite')).then(()=>true).catch(e=>{
         if((e as NodeJS.ErrnoException).code==='ENOENT')return false;throw e;
       });
-      if(existingDb)throw Error('Chave cifrada do SQLite ausente: restaure-a do backup antes de consultar.');
+      if(existingDb)throw Error('Chave cifrada do SQLite ausente: restaure-a do backup antes de consultar.',{cause:e});
       const secret=randomBytes(32);encrypted=await this.protector.encrypt(secret.toString('hex'));
       try{await writeFile(keyFile,encrypted,{flag:'wx',mode:0o600});}
       catch(e2){if((e2 as NodeJS.ErrnoException).code!=='EEXIST')throw e2;encrypted=await readFile(keyFile);}
@@ -106,7 +106,7 @@ export class QueryHistoryStore {
         try{await writeFile(initializationMark,'initialized',{flag:'wx',mode:0o600});}
         catch(e){if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e;}
       }
-    }catch(e){db.close();this.db=undefined;throw Error(`Banco de consultas indisponível: ${e instanceof Error?e.message:'erro desconhecido'}. Nenhuma consulta nova será realizada.`);}
+    }catch(e){db.close();this.db=undefined;throw Error(`Banco de consultas indisponível: ${e instanceof Error?e.message:'erro desconhecido'}. Nenhuma consulta nova será realizada.`,{cause:e});}
   }
   private async ensure(allowClosing=false):Promise<DatabaseSync>{
     if(this.closed&&!allowClosing)throw Error('Histórico encerrado; crie uma nova instância para acessar o banco.');
@@ -146,6 +146,7 @@ export class QueryHistoryStore {
       const data:unknown=JSON.parse(clear.result);
       if(!Array.isArray(data))throw Error('Legacy invalid');
       rows=data.map(validate);
+    // eslint-disable-next-line preserve-caught-error -- a causa pode ser SyntaxError com trecho do histórico decifrado (CPF), que não pode ir para logs.
     }catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw Error('Histórico antigo inacessível; migração interrompida sem excluí-lo.');}
     const encrypted=await Promise.all(rows.map(row=>this.encrypt(row)));
     db.exec('BEGIN IMMEDIATE');

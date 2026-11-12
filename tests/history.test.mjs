@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import { QueryHistoryStore } from '../src/main/query-history.ts';
 const protector={isAvailable:async()=>true,encrypt:async text=>Buffer.from(`cipher:${Buffer.from(text).toString('base64')}`),decrypt:async data=>({result:Buffer.from(data.toString().slice(7),'base64').toString(),shouldReEncrypt:false})};
 test('índice protege CPF, código e caminho e sobrevive à reinicialização',async()=>{
  const directory=await mkdtemp(join(tmpdir(),'deskdata-history-'));

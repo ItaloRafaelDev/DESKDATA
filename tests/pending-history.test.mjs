@@ -1,7 +1,6 @@
 import { historyTestScope } from './helpers/history-store.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';
-import {QueryHistoryStore} from '../src/main/query-history.ts';
 const protector={isAvailable:async()=>true,encrypt:async s=>Buffer.from(s),decrypt:async b=>({result:b.toString()})};
 test('registro pendente persiste e pausado pode ser retomado sem novo POST',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'deskdata-watch-'));

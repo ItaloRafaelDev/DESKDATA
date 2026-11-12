@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import {mkdtemp,readFile,readdir,rm,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {QueryHistoryStore} from '../src/main/query-history.ts';
 const protector={isAvailable:async()=>true,encrypt:async text=>Buffer.from(`cipher:${Buffer.from(text).toString('base64')}`),decrypt:async data=>({result:Buffer.from(data.toString().slice(7),'base64').toString(),shouldReEncrypt:false})};
 test('SQLite persiste registros individualmente cifrados, sem limite de 1.000, com índices',async()=>{
  const folder=await mkdtemp(join(tmpdir(),'deskdata-sqlite-'));

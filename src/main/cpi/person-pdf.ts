@@ -1,5 +1,5 @@
 import { open, realpath, stat } from 'node:fs/promises';
-import { basename, relative, resolve, isAbsolute, sep } from 'node:path';
+import { basename, relative, isAbsolute, sep } from 'node:path';
 import { cpfDigits, isValidCpf } from '../../shared/cpf.ts';
 import type { QueryRecord } from '../query-history.ts';
 

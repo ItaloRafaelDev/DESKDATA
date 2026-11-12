@@ -20,7 +20,7 @@ export class CredentialStore {
   }
   async status():Promise<CredentialStatus>{
     try {await access(this.filePath);return {hasSaved:true};}
-    catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return {hasSaved:false};throw new Error('Falha ao verificar credenciais protegidas.');}
+    catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return {hasSaved:false};throw new Error('Falha ao verificar credenciais protegidas.',{cause:e});}
   }
   async save(email:string,password:string):Promise<void>{
     if (!email.trim() || !password) throw new Error('Usuário e senha são obrigatórios para lembrar o acesso.');
@@ -33,7 +33,7 @@ export class CredentialStore {
       await rename(tempFile,this.filePath);
     } catch(e) {
       await unlink(tempFile).catch(()=>{});
-      throw new Error('Não foi possível salvar as credenciais protegidas.');
+      throw new Error('Não foi possível salvar as credenciais protegidas.',{cause:e});
     }
   }
   async load():Promise<SavedCredential|null>{
@@ -55,6 +55,6 @@ export class CredentialStore {
   }
   async clear():Promise<void>{
     try {await unlink(this.filePath);}
-    catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw new Error('Não foi possível remover as credenciais salvas.');}
+    catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw new Error('Não foi possível remover as credenciais salvas.',{cause:e});}
   }
 }

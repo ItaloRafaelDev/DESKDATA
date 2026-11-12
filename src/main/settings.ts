@@ -11,7 +11,7 @@ export async function getSettings():Promise<AppSettings>{
     return {outputFolder:typeof parsed.outputFolder==='string'?parsed.outputFolder:null,paidQueriesApproved:false};
   } catch(err){
     if((err as NodeJS.ErrnoException).code==='ENOENT')return {...defaults};
-    throw new Error('Não foi possível ler as configurações locais.');
+    throw new Error('Não foi possível ler as configurações locais.',{cause:err});
   }
 }
 export async function saveSettings(value:AppSettings):Promise<void>{

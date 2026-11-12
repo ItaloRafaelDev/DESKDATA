@@ -59,7 +59,7 @@ export async function inspectPendingPerson29Rows(page: Page, expectedTotal: numb
   }
 
   let framesInspected = 0;
-  let candidates: FrameRowsResult[] = [];
+  const candidates: FrameRowsResult[] = [];
   for (const frame of page.frames()) {
     if (!isOfficialCpiFrame(frame)) continue;
     framesInspected++;

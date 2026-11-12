@@ -2,7 +2,6 @@ import { historyTestScope } from './helpers/history-store.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DeskdataClient } from '../src/main/deskdata-client.ts';
-import { QueryHistoryStore } from '../src/main/query-history.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
