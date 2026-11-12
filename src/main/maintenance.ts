@@ -1,15 +1,15 @@
 import { lstat, unlink } from 'node:fs/promises';
 import { basename, isAbsolute } from 'node:path';
 import type { QueryHistoryStore } from './query-history.ts';
+import { isManagedPdfName } from './pdf-names.ts';
 
 export interface MaintenanceSelection {pdfs:boolean;history:boolean}
 export interface MaintenancePreview {recordCount:number;pdfCount:number;pendingCount:number}
 export interface MaintenanceResult {deletedPdfs:number;missingPdfs:number;deletedRecords:number}
 
-/** Reconhece nomes efetivamente gerados pelas diferentes versões do DESKDATA. */
-const REPORT_NAME=/^(?:RELATORIO_\d{11}|PIS_\d{11}|CNPJ_\d{14}|DESKDATA_\d{11})_\d{4}-\d{2}-\d{2}(?:-\d{2,3})?\.pdf$/i;
+/** Reconhece nomes efetivamente gerados pelas diferentes versões do DESKDATA (novos e legados). */
 function managedFile(path:string):boolean{
-  return typeof path==='string' && isAbsolute(path) && REPORT_NAME.test(basename(path));
+  return typeof path==='string' && isAbsolute(path) && isManagedPdfName(basename(path));
 }
 
 /** Exclusão local explícita; nunca varre a pasta arbitrária escolhida pelo usuário. */
@@ -46,7 +46,7 @@ export class MaintenanceService {
           }
         }catch{
           // Se ocorrer falha parcial, preservar as referências dos arquivos que não foram removidos.
-          // A causa (erro de fs) contém o caminho do PDF (RELATORIO_<CPF>_...) e não é exposta.
+          // A causa (erro de fs) contém o caminho do PDF (nomes legados contêm o documento) e não é exposta.
           await this.history.removePdfReferences(cleared);
           throw new Error(`Limpeza parcial. ${deletedPdfs} PDF(s) excluído(s); os demais registros foram preservados. Não foi possível excluir um dos arquivos.`);
         }

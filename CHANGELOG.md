@@ -15,6 +15,8 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 
 ### Alterado
 - `CLAUDE.md` passa a importar só o `AGENTS.md` (fonte única de regras); as regras úteis que faltavam foram movidas para o `AGENTS.md`.
+- Nomes dos PDFs sem CPF nem CNPJ: respostas CPI geram `CPI_<pesquisaId>_<solicitacaoId>_<data>.pdf`; consultas manuais geram `RELATORIO_`, `PIS_` e `CNPJ_<queryCode>_<data>.pdf` (`SEM-CODIGO` quando a API não devolve código). Regerações no mesmo dia recebem sufixo `-02` a `-99`, sem sobrescrever. Arquivos antigos não são renomeados e continuam reconhecidos pela limpeza.
+- O anexo da CPI só aceita o PDF `CPI_` do par pesquisa/solicitação em processamento, registrado na consulta vinculada, dentro da pasta configurada e com assinatura `%PDF-`. PDFs legados nunca são enviados: sem PDF no padrão novo, o PDF é regerado a partir do resultado já registrado na Deskdata (GET pelo código), sem novo POST.
 
 ### Corrigido
 - Testes CPI comparavam caminhos temporários não canônicos; falhavam no runner Windows (TEMP com nome 8.3).

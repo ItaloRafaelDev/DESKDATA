@@ -55,6 +55,14 @@ test('limpeza completa abrange todas as contas e tipos, mas só arquivos registr
  assert.equal(await readFile(external,'utf8'),'private');
 }));
 
+test('limpeza remove PDFs nos padrões novos (CPI e código da consulta) junto com os legados',async()=>fixture(async({docs,history,record,pdf,maintenance})=>{
+ const names=['CPI_537987_275064_2026-11-12.pdf','RELATORIO_Q-ABC123DEF4_2026-11-12-02.pdf','PIS_SEM-CODIGO_2026-11-12.pdf'];
+ for(const name of names){const file=join(docs,name);await writeFile(file,'generated');await history.addPdf(record.id,file);}
+ const result=await maintenance.clean({pdfs:true,history:false});
+ assert.equal(result.deletedPdfs,4);
+ for(const file of [pdf,...names.map(name=>join(docs,name))])await assert.rejects(readFile(file),{code:'ENOENT'});
+}));
+
 test('impede remoção de PDFs com nomes não reconhecidos e preserva histórico',async()=>fixture(async({docs,history,record,maintenance})=>{
  const unexpected=join(docs,'documento-terceiro.pdf');await writeFile(unexpected,'third party');
  await history.addPdf(record.id,unexpected);

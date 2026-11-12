@@ -27,6 +27,7 @@ export interface FullCycleServices {
   paidApproved():Promise<boolean>;
   submitCpf(cpf:string,callback:(code:string)=>Promise<void>):Promise<{state:'pending';queryCode:string}|{state:'ready';queryCode?:string;payload:unknown}>;
   fetchByCode(code:string):Promise<{payload:unknown;queryCode:string}>;
+  /** Grava o PDF CPI (CPI_<pesquisaId>_<solicitacaoId>_<data>.pdf) e o registra na consulta. */
   savePdf(cpf:string,recordId:string,queryCode:string|undefined,data:NormalizedData):Promise<void>;
   uploadAndSave(pdfPath:string,classification:'restrictions'|'information'):Promise<'confirmed'|'confirmed_auxiliary_404'|'unverified'|'not_submitted'>;
   closeCompletedDetail():Promise<void>;
@@ -116,7 +117,7 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
   if(!updated||updated.id!==record.id)throw new Error('Histórico mudou durante geração do PDF.');
   const currentPdfPaths=updated.pdfPaths.filter(path=>!previousPdfPaths.has(path));
   // Nunca voltar silenciosamente ao PDF legado se a geração atual não foi vinculada.
-  const pdf=await findCpiPersonPdf({...updated,pdfPaths:currentPdfPaths},cpf,s.outputFolder);
+  const pdf=await findCpiPersonPdf({...updated,pdfPaths:currentPdfPaths},cpf,s.outputFolder,s.ids);
   await s.mark('pdf_ready',{historyRecordId:record.id,classification:classification.result});
   // Sem retry após esta marcação: eventual timeout ou queda pode significar envio já aceito.
   await s.mark('submit_started');

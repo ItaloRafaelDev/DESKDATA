@@ -23,8 +23,11 @@ export interface PrepareCpiPersonPdfArgs {
   cpf: string;
   outputFolder: string | null;
   findLatest: (account: string, cpf: string, kind: 'person') => Promise<QueryRecord | null>;
-  /** DEVE usar somente GET por codigo existente, nunca POST. */
-  recoverExisting: (record: QueryRecord) => Promise<RecoveryOutcome>;
+  /**
+   * Regera o PDF CPI desta pesquisa a partir do resultado ja registrado: DEVE usar somente GET pelo
+   * codigo existente, nunca POST, e registrar o PDF CPI_<pesquisaId>_<solicitacaoId> na consulta.
+   */
+  regenerateCpiPdf: (record: QueryRecord) => Promise<RecoveryOutcome>;
 }
 
 function assertSameIdentity(row: QueryRecord, account: string, cpf: string): void {
@@ -41,7 +44,7 @@ function assertSameIdentity(row: QueryRecord, account: string, cpf: string): voi
  * - Nunca expoe CPF, codigo da API, caminho local ou resultado bruto no IPC.
  */
 export async function prepareCpiPersonPdf(args: PrepareCpiPersonPdfArgs): Promise<CpiPersonPreparationResult> {
-  const { ids, account, cpf, outputFolder, findLatest, recoverExisting } = args;
+  const { ids, account, cpf, outputFolder, findLatest, regenerateCpiPdf } = args;
   if (!validateCpiRowId(ids) || !account.trim() || !isValidCpf(cpf)) {
     throw new Error('Identificacao CPI ou sessao Deskdata invalida.');
   }
@@ -53,18 +56,18 @@ export async function prepareCpiPersonPdf(args: PrepareCpiPersonPdfArgs): Promis
   assertSameIdentity(latest, account, cpf);
   if (!outputFolder) return result('folder_unconfigured', false);
 
-  // PDF reutilizado somente quando registrado na consulta mais recente e validado no destino.
+  // PDF reutilizado somente quando e o PDF CPI desta pesquisa, registrado na consulta mais recente.
   if (latest.status === 'ready') {
     try {
-      await findCpiPersonPdf(latest, cpf, outputFolder);
+      await findCpiPersonPdf(latest, cpf, outputFolder, ids);
       return result('pdf_ready', true);
     } catch {
-      // PDF ausente: somente recuperar via codigo existente, nunca um POST novo.
+      // Sem PDF no padrao CPI (ausente ou legado): regerar via codigo existente, nunca um POST novo.
     }
   }
 
   if (!latest.queryCode) return result('manual_review', false);
-  const recovered = await recoverExisting(latest);
+  const recovered = await regenerateCpiPdf(latest);
   if (recovered.state === 'pending') return result('pending', true);
 
   const updated = await findLatest(account, cpf, 'person');
@@ -75,6 +78,6 @@ export async function prepareCpiPersonPdf(args: PrepareCpiPersonPdfArgs): Promis
   if (updated.status !== 'ready') {
     throw new Error('A API informou conclusao, mas o historico nao confirmou o PDF.');
   }
-  await findCpiPersonPdf(updated, cpf, outputFolder);
+  await findCpiPersonPdf(updated, cpf, outputFolder, ids);
   return result('pdf_ready', true);
 }

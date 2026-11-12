@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { prepareCpiPersonPdf } from '../src/main/cpi/person-recovery.ts';
@@ -16,9 +16,10 @@ const createRecord = (overrides = {}) => ({
 const call = (options = {}) => {
   const findLatest = options.findLatest ?? (async () => null);
   return prepareCpiPersonPdf({ ids, account, cpf, outputFolder: '/tmp/pdf',
-    recoverExisting: async () => { throw new Error('GET should not be called'); },
+    regenerateCpiPdf: async () => { throw new Error('GET should not be called'); },
     ...options, findLatest });
 };
+const pdfBytes = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(120)]);
 
 test('4B: sem historico indica autorizacao; nunca tenta recuperar', async () => {
   const result = await call();
@@ -46,18 +47,18 @@ test('4B: consulta de CPF divergente e bloqueada', async () => {
 
 test('4B: pendencia com codigo utiliza recuperacao existente e retorna pending', async () => {
   let recovered = 0;
-  const result = await call({findLatest: async () => createRecord(), recoverExisting: async row => {
+  const result = await call({findLatest: async () => createRecord(), regenerateCpiPdf: async row => {
     assert.equal(row.queryCode, 'Q-ABCDEF0123'); recovered++; return {state:'pending'};
   }});
   assert.equal(result.state,'pending');
   assert.equal(recovered,1);
 });
 
-test('4B: pdf da consulta mais recente pode ser reutilizado sem GET', async () => {
-  const folder = await mkdtemp(join(tmpdir(), 'cpi-4b-'));
+test('4B: pdf CPI da consulta mais recente pode ser reutilizado sem GET', async () => {
+  const folder = await realpath(await mkdtemp(join(tmpdir(), 'cpi-4b-')));
   try {
-    const path = join(folder,`RELATORIO_${cpf}_2026-11-10.pdf`);
-    await writeFile(path, Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(120)]));
+    const path = join(folder,'CPI_537987_275064_2026-11-10.pdf');
+    await writeFile(path, pdfBytes);
     const result=await call({outputFolder:folder, findLatest:async()=>createRecord({status:'ready',pdfPaths:[path]})});
     assert.equal(result.state,'pdf_ready');assert.equal(result.reused,true);
     assert.ok(!JSON.stringify(result).includes(folder));
@@ -65,13 +66,29 @@ test('4B: pdf da consulta mais recente pode ser reutilizado sem GET', async () =
   } finally { await rm(folder,{recursive:true,force:true}); }
 });
 
-test('4B: GET que confirma resultado e salva PDF e validado antes do retorno', async () => {
-  const folder = await mkdtemp(join(tmpdir(), 'cpi-4b-'));
+test('4B: PDF legado nao e reutilizado; o PDF CPI e regerado por GET, sem POST', async () => {
+  const folder = await realpath(await mkdtemp(join(tmpdir(), 'cpi-4b-')));
   try {
-    const path = join(folder,`RELATORIO_${cpf}_2026-11-10.pdf`);
+    const legacy = join(folder,`RELATORIO_${cpf}_2026-11-10.pdf`);
+    const fresh = join(folder,'CPI_537987_275064_2026-11-12.pdf');
+    await writeFile(legacy, pdfBytes);
+    let record = createRecord({status:'ready',pdfPaths:[legacy]}), regenerated = 0;
+    const result=await call({outputFolder:folder, findLatest:async()=>record, regenerateCpiPdf:async row=>{
+      assert.equal(row.queryCode,'Q-ABCDEF0123'); regenerated++;
+      await writeFile(fresh,pdfBytes); record=createRecord({status:'ready',pdfPaths:[legacy,fresh]});
+      return {state:'ready'};
+    }});
+    assert.equal(result.state,'pdf_ready');assert.equal(regenerated,1);
+  } finally { await rm(folder,{recursive:true,force:true}); }
+});
+
+test('4B: GET que confirma resultado e salva PDF e validado antes do retorno', async () => {
+  const folder = await realpath(await mkdtemp(join(tmpdir(), 'cpi-4b-')));
+  try {
+    const path = join(folder,'CPI_537987_275064_2026-11-10.pdf');
     let record = createRecord();
-    const result=await call({outputFolder:folder, findLatest:async()=>record, recoverExisting:async()=>{
-      await writeFile(path,Buffer.concat([Buffer.from('%PDF-1.7\n'),Buffer.alloc(120)]));
+    const result=await call({outputFolder:folder, findLatest:async()=>record, regenerateCpiPdf:async()=>{
+      await writeFile(path,pdfBytes);
       record=createRecord({status:'ready',pdfPaths:[path]});
       return {state:'ready'};
     }});
@@ -79,16 +96,27 @@ test('4B: GET que confirma resultado e salva PDF e validado antes do retorno', a
   } finally { await rm(folder,{recursive:true,force:true}); }
 });
 
+test('4B: regeracao que grava PDF de outra pesquisa nao confirma sucesso', async () => {
+  const folder = await realpath(await mkdtemp(join(tmpdir(), 'cpi-4b-')));
+  try {
+    const other = join(folder,'CPI_537988_275064_2026-11-12.pdf');
+    let record = createRecord();
+    await assert.rejects(call({outputFolder:folder, findLatest:async()=>record, regenerateCpiPdf:async()=>{
+      await writeFile(other,pdfBytes); record=createRecord({status:'ready',pdfPaths:[other]}); return {state:'ready'};
+    }}),/PDF correspondente/);
+  } finally { await rm(folder,{recursive:true,force:true}); }
+});
+
 test('4B: GET pronto sem PDF no historico nao confirma sucesso', async () => {
   const folder=await mkdtemp(join(tmpdir(),'cpi-4b-'));
   try {
-    await assert.rejects(call({outputFolder:folder,findLatest:async()=>createRecord({status:'ready'}), recoverExisting:async()=>({state:'ready'})}),/PDF correspondente/);
+    await assert.rejects(call({outputFolder:folder,findLatest:async()=>createRecord({status:'ready'}), regenerateCpiPdf:async()=>({state:'ready'})}),/PDF correspondente/);
   } finally { await rm(folder,{recursive:true,force:true}); }
 });
 
 test('4B: troca de registro mais recente durante GET interrompe associacao', async () => {
   let read=0;
-  await assert.rejects(call({findLatest:async()=>{read++;return createRecord(read>1?{id:'another-record'}:{});},recoverExisting:async()=>({state:'ready'})}),/alterado/);
+  await assert.rejects(call({findLatest:async()=>{read++;return createRecord(read>1?{id:'another-record'}:{});},regenerateCpiPdf:async()=>({state:'ready'})}),/alterado/);
 });
 
 test('4B: bloqueia identificadores invalidos antes de acessar historico', async () => {

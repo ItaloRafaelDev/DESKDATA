@@ -24,13 +24,21 @@ const probe=(args,rec)=>inspectCpiPersonHistory({...base,outputFolder:null,...ar
  });
  test('CPI 4A: PDF ausente na pasta configurada não é aceito',async()=>{
   const root=await mkdtemp(join(tmpdir(),'cpi4a-'));
-  try {assert.equal((await probe({outputFolder:root},record(join(root,`RELATORIO_${cpf}_2026-11-10.pdf`)))).state,'pdf_unavailable');}
+  try {assert.equal((await probe({outputFolder:root},record(join(root,'CPI_537987_275064_2026-11-10.pdf')))).state,'pdf_unavailable');}
   finally{await rm(root,{recursive:true,force:true});}
+ });
+ test('CPI 4A: PDF legado com CPF no nome não conta como PDF desta pesquisa',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'cpi4a-'));
+  try{
+    const path=join(root,`RELATORIO_${cpf}_2026-11-10.pdf`);
+    await writeFile(path,Buffer.concat([Buffer.from('%PDF-1.7\n'),Buffer.alloc(120,65)]));
+    assert.equal((await probe({outputFolder:root},record(path))).state,'pdf_unavailable');
+  }finally{await rm(root,{recursive:true,force:true});}
  });
  test('CPI 4A: PDF correto é aceito, mas não expõe CPF, caminho nem dados do documento',async()=>{
   const root=await mkdtemp(join(tmpdir(),'cpi4a-'));
   try{
-    const path=join(root,`RELATORIO_${cpf}_2026-11-10.pdf`);
+    const path=join(root,'CPI_537987_275064_2026-11-10.pdf');
     await writeFile(path,Buffer.concat([Buffer.from('%PDF-1.7\n'),Buffer.alloc(120,65)]));
     const result=await probe({outputFolder:root},record(path));
     assert.equal(result.state,'pdf_available');

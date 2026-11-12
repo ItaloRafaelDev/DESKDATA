@@ -97,7 +97,7 @@ test('judicial: geração manual preserva todos os processos e concorda com a de
 test('judicial: PDF ready legado não substitui relatório da resposta usada na classificação atual',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'deskdata-judicial-'));
   try{
-    const oldPath=join(directory,`RELATORIO_${cpf}_2026-11-10.pdf`),newPath=join(directory,`RELATORIO_${cpf}_2026-11-11.pdf`);
+    const oldPath=join(directory,`RELATORIO_${cpf}_2026-11-10.pdf`),newPath=join(directory,'CPI_537987_275064_2026-11-11.pdf');
     const oldBytes=Buffer.from('%PDF-1.4\n'+'PROCESSO-LEGADO\n'.repeat(20));await writeFile(oldPath,oldBytes);
     const record={id:recordId,account,cpf,kind:'person',queryCode:code,status:'ready',pdfPaths:[oldPath]};
     const store=new CpiWorkflowStore(directory,protector);
