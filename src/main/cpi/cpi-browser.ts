@@ -5,6 +5,7 @@ import { validateCpiPersonDetails, resolveCpiDetailHeadings, matchesCpiDetailHea
 import { classifyCpiVisibleServerError, hasConfirmedSavedCpiResponse, type CpiSavedResponseEvidence } from './response-confirmation.ts';
 import { refreshPendingAfterConfirmedSave } from './pending-refresh.ts';
 import { cpfDigits, isValidCpf } from '../../shared/cpf.ts';
+import { NULL_TIMER, type EndStep, type StepTimer } from '../step-timing.ts';
 
 export const CPI_LOGIN_URL = 'https://adm.cpicentral.com.br/acesso/checkUser.aspx';
 const CPI_HOST = 'adm.cpicentral.com.br';
@@ -127,7 +128,7 @@ export class CpiBrowser {
   }
 
   /** Abre somente o formulário existente de um registro mapeado; não salva nem consulta a Deskdata. */
-  async inspectPendingPersonDetails(ids: CpiPendingRowId): Promise<CpiPendingPersonDetail> {
+  async inspectPendingPersonDetails(ids: CpiPendingRowId, timer: Pick<StepTimer,'begin'> = NULL_TIMER): Promise<CpiPendingPersonDetail> {
     if (this.status().state !== 'open' || !this.page) throw new Error('Abra e autentique primeiro o navegador CPI.');
     if (!validateCpiRowId(ids) || !this.lastMappedRows.some(row =>
       row.pesquisaId === ids.pesquisaId && row.solicitacaoId === ids.solicitacaoId)) {
@@ -135,6 +136,8 @@ export class CpiBrowser {
     }
     const page = this.page;
     this.lastReadCpf = null;
+    let endStep = timer.begin('cpi_open_detail');
+    try {
     // Se o usuário já abriu manualmente o mesmo formulário, aproveitá-lo sem segundo clique.
     let raw = await this.readDetailsFromOpenFrame(ids);
     if (!raw) {
@@ -174,12 +177,16 @@ export class CpiBrowser {
       const diagnostic = await this.detailReadDiagnostic();
       throw new Error(`O detalhe da CPI nao foi reconhecido (${diagnostic}). Nenhuma consulta ou envio foi executado.`);
     }
+    endStep('success');
+    endStep = timer.begin('cpi_read_cpf');
     const detail=await this.readDetailFrame(ids);
     if(!detail)throw new Error('O formulário CPI mudou durante a validação.');
     const checked = validateCpiPersonDetails(ids, detail.raw);
     // CPF completo permanece somente na memória do processo principal para uma etapa futura.
     this.lastReadCpf = {ids,cpf:checked.cpf,frame:detail.frame};
+    endStep('success');
     return checked.publicDetail;
+    } catch (error) { endStep('failed', error); throw error; }
   }
 
   /** Uso exclusivo do Electron Main; nunca expor o CPF pelo preload/renderer. */
@@ -317,9 +324,12 @@ export class CpiBrowser {
   }
 
   /** Preenche o formulário observado e salva sem reabrir o registro depois. */
-  async uploadAndSavePersonResponse(ids: CpiPendingRowId, pdfPath: string, classification: 'restrictions' | 'information', confirmationTimeoutMs=20000): Promise<'confirmed' | 'confirmed_auxiliary_404' | 'unverified' | 'not_submitted'> {
+  async uploadAndSavePersonResponse(ids: CpiPendingRowId, pdfPath: string, classification: 'restrictions' | 'information', confirmationTimeoutMs=20000, timer: Pick<StepTimer,'begin'> = NULL_TIMER): Promise<'confirmed' | 'confirmed_auxiliary_404' | 'unverified' | 'not_submitted'> {
     let effectsPossible=false;
     let earlyPostback=false;
+    // Etapa aberta no momento; o finally a encerra como falha se não houve confirmação.
+    let endStep: EndStep | null = null;
+    let saved=false;
     let watchedPage:Page|null=null;
     let observeEarlyEffects:((request:Request)=>void)|null=null;
     try {
@@ -332,6 +342,7 @@ export class CpiBrowser {
     this.lastConfirmedSave = null;
     const frame=detail.frame;
     if(frame!==this.lastReadCpf?.frame)throw new Error('O frame CPI mudou desde a leitura da identidade.');
+    endStep=timer.begin('cpi_fill');
     // Mudanças em controles também podem disparar postbacks no portal legado.
     watchedPage=page;
     observeEarlyEffects=request=>{
@@ -432,6 +443,8 @@ export class CpiBrowser {
       throw new Error('Botão de salvamento e PDF pertencem a formulários diferentes.');
     }
     await assertIdentity();
+    endStep('success');
+    endStep=timer.begin('cpi_attach');
     effectsPossible=true;
     await files.setInputFiles(pdfPath);
     const attached = await files.evaluate(input => {
@@ -440,6 +453,8 @@ export class CpiBrowser {
     });
     if (!attached) throw new Error('O formulário CPI não confirmou o anexo PDF.');
     await assertIdentity();
+    endStep('success');
+    endStep=timer.begin('cpi_save');
     let approvedConfirm = false;
     let httpSubmitted = false;
     let armed=false;
@@ -502,6 +517,7 @@ export class CpiBrowser {
           const evidence = await this.savedResponseEvidence(frame,ids, classification);
           if (!portalHttpFailure && !portalAlertFailure && evidence && hasConfirmedSavedCpiResponse(evidence)) {
             this.lastConfirmedSave = {...ids,frame};
+            saved=true;
             return evidence.auxiliary404Observed ? 'confirmed_auxiliary_404' : 'confirmed';
           }
         }
@@ -519,6 +535,7 @@ export class CpiBrowser {
       return effectsPossible?'unverified':'not_submitted';
     } finally {
       if(watchedPage&&observeEarlyEffects)watchedPage.off('request',observeEarlyEffects);
+      endStep?.(saved?'success':'failed');
     }
   }
 

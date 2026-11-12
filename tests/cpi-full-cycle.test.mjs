@@ -83,6 +83,33 @@ test('ciclo completo simulado: um POST, PDF correto, resposta Há Informações 
     assert.equal(again.state,'completed');assert.equal(uploadCount,1);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+test('ciclo completo mede consulta, PDF e fechamento na ordem, sem receber CPF',async()=>{
+  const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-timing-')));
+  try{
+    const steps=[];
+    const {s}=services({
+      outputFolder:dir,
+      timer:{step:async(name,work)=>{assert.equal(typeof name,'string');steps.push(name);return work();}},
+      savePdf:async cpf=>{
+        const path=join(dir,`RELATORIO_${cpf}_2026-11-10.pdf`);
+        await writeFile(path,'%PDF-1.4\n'+'x'.repeat(150));
+        const latest=await s.findLatest(cpf);latest.status='ready';latest.pdfPaths=[path];
+      }
+    });
+    assert.equal((await executeCpiPersonCycle(s)).state,'completed');
+    assert.deepEqual(steps,['deskdata_credits','deskdata_query','report_pdf','cpi_close_detail']);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('consulta existente mede o GET por código, nunca um POST',async()=>{
+  const steps=[];
+  const {s,setRecord}=services({timer:{step:async(name,work)=>{steps.push(name);return work();}},
+    submitCpf:async()=>{throw Error('POST indevido');},savePdf:async()=>{throw Error('PDF interrompido');}});
+  setRecord({id:'123e4567-e89b-12d3-a456-426614174000',kind:'person',cpf:CPF,account:s.account,status:'ready',queryCode:'Q-AAAAAAAAAA',pdfPaths:[]});
+  await assert.rejects(executeCpiPersonCycle(s),/PDF interrompido/);
+  assert.deepEqual(steps,['deskdata_fetch','report_pdf']);
+});
+
 test('processo Criminal vira restrições; envio sem confirmação fica travado',async()=>{
   const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-cycle-')));
   try{

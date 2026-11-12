@@ -25,6 +25,26 @@ for(const mode of ['pending','error']){
   }));
 }
 
+test('IPC real: consulta manual grava duração de cada etapa com um id de correlação e sem CPF',()=>withMainProcess(async(cpf,onCode)=>{
+  if(cpf===B)throw new TypeError('Falha simulada após envio');
+  await onCode('Q-AAAAAAAAAA');return {state:'ready',queryCode:'Q-AAAAAAAAAA',payload:payload(A)};
+},async({invoke,diagnostics})=>{
+  assert.equal((await invoke('api:query',A)).state,'ready');
+  const timing=()=>diagnostics.filter(row=>row.event.startsWith('timing_'));
+  const first=timing();
+  assert.deepEqual(first.map(row=>row.step??row.event),['deskdata_credits','deskdata_query','report_pdf','timing_cycle']);
+  assert.equal(new Set(first.map(row=>row.correlationId)).size,1);
+  assert.ok(first.every(row=>row.flow==='person'&&row.state==='success'&&Number.isFinite(row.durationMs)));
+  assert.equal(first.at(-1).outcome,'ready');
+  diagnostics.length=0;
+  await assert.rejects(invoke('api:query',B),/Falha simulada/);
+  const failed=timing();
+  assert.deepEqual(failed.map(row=>`${row.step??row.event}:${row.state}`),['deskdata_credits:success','deskdata_query:failed','timing_cycle:failed']);
+  assert.equal(failed[1].errorType,'TypeError');
+  assert.notEqual(failed[0].correlationId,first[0].correlationId);
+  assert.doesNotMatch(JSON.stringify([...first,...failed]),new RegExp(`${A}|${B}|Q-AAAAAAAAAA`));
+}));
+
 test('IPC real: sucesso imediato com CPF divergente é rejeitado sem PDF ou ready',()=>withMainProcess(async(_cpf,onCode)=>{
   await onCode('Q-BBBBBBBBBB');return {state:'ready',queryCode:'Q-BBBBBBBBBB',payload:payload(A)};
 },async({invoke,renderCount})=>{

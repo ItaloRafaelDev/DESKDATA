@@ -34,6 +34,26 @@ test('CPI: resposta persistida confirma IDs, classificação e o PDF selecionado
   assert.deepEqual(await readFile(pdf),before);
 }));
 
+function stepRecorder(){
+  const steps=[];
+  return {steps,timer:{begin:step=>{let done=false;return state=>{if(!done){done=true;steps.push(`${step}:${state}`);}};}}};
+}
+
+test('CPI: tempos de abrir detalhe, ler CPF, preencher, anexar e salvar são medidos em etapas separadas',()=>portalFixture({},async({driver,pdf})=>{
+  const {steps,timer}=stepRecorder();
+  await driver.inspectPendingPersonDetails(ids,timer);
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',2000,timer),'confirmed');
+  assert.deepEqual(steps,['cpi_open_detail:success','cpi_read_cpf:success','cpi_fill:success','cpi_attach:success','cpi_save:success']);
+}));
+
+test('CPI: salvamento sem confirmação encerra a etapa de salvar como falha',()=>portalFixture({
+  afterPost:route=>route.fulfill({status:302,headers:{location:origin+'/acesso/checkUser.aspx'},body:''})
+},async({driver,pdf})=>{
+  const {steps,timer}=stepRecorder();
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500,timer),'unverified');
+  assert.deepEqual(steps,['cpi_fill:success','cpi_attach:success','cpi_save:failed']);
+}));
+
 for(const target of [{...ids,pesquisaId:'1537987'},{...ids,solicitacaoId:'1275064'}]){
   test(`CPI: IDs com prefixos comuns não confirmam ${target.pesquisaId}/${target.solicitacaoId}`,()=>portalFixture({saved:persisted({target})},async({driver,pdf,posts})=>{
     assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');

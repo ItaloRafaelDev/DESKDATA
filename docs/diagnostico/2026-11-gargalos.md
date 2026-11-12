@@ -1,0 +1,172 @@
+# Diagnóstico de gargalos e base de medição — v0.2 (Etapa 0)
+
+Data: 2026-11-12 · Branch: `feature/v02-e0-diagnostico` · Base: `main` em `844ec9a`.
+
+Este documento é a entrega da Etapa 0 do plano `docs/superpowers/plans/2026-11-12-plano-v0.2-cpi-estabilidade.md`.
+Cada item recebe um ID, a localização (arquivo:linha na branch desta etapa), a classe de risco
+(**travamento**, **loop** ou **desempenho**), a severidade e a etapa que o trata (E1 a E5).
+Itens que não serão tratados ficam marcados como **aceito (baixo)**, com justificativa.
+
+Legenda de severidade: **alta** = pode parar o FULL AUTO ou o app sem saída; **média** = pode atrasar
+muito ou exigir intervenção; **baixa** = efeito limitado ou improvável.
+
+Observação sobre o Playwright: o código não chama `setDefaultTimeout`. Ações de locator sem `timeout`
+explícito (`click`, `getAttribute`, `isChecked`, `textContent`, `locator.evaluate`) usam o padrão de 30 s
+**para localizar o elemento**. `frame.evaluate`, `locator.evaluateAll`, `elementHandle.contentFrame`,
+`browser.newContext`, `context.newPage`, `page.bringToFront` e `browser.close` não têm limite de tempo próprio:
+se o script da página ou o Edge parar de responder, a espera não termina.
+
+---
+
+## 1. Esperas externas
+
+| ID | Local | Espera | Limite atual | Risco | Sev. | Etapa |
+|---|---|---|---|---|---|---|
+| W1 | `src/main/deskdata-client.ts:43-67` | `fetch` da Deskdata (inclui leitura do corpo) | 35 s via `AbortController`; sem `AbortSignal` externo | travamento | baixa | E3 (propagar cancelamento) |
+| W2 | `src/main/deskdata-client.ts:90-98` | `awaitResult`: 24 × (sleep 5 s + GET até 35 s) | pior caso ≈ 16 min; `sleep` não é cancelável | travamento | **alta** | E3 |
+| W3 | `src/main/index.ts:136` (`fetchByCode` no ciclo CPI), `:386`, `:394`, `:414` | `fetchByCode` → W2 dentro de operação exclusiva, com o modal CPI aberto no caso do ciclo | herda W2 | travamento | **alta** | E3 |
+| W4 | `src/main/index.ts:403` | `queryBasicCpf` (PIS) → `queryWithKey` → W2 dentro do IPC | herda W2 | travamento | média | E3 |
+| W5 | `src/main/pdf-render.ts:43-59` | carregar HTML, fontes e `printToPDF` | 120 s total, janela destruída (#12) | travamento | — | **resolvido** (PR #12) |
+| W6 | `src/main/pdf-render.ts:26-34`, `src/main/cpi/person-pdf.ts:15-32` | `stat`/`writeFile`/`realpath`/`open` na pasta do usuário (pode ser unidade de rede) | nenhum; a escrita do PDF fica fora do timeout de 120 s | travamento | média | E3 |
+| W7 | `src/main/cpi/cpi-browser.ts:53` | `chromium.launch` | 25 s | travamento | — | aceito (baixo): já limitado |
+| W8 | `src/main/cpi/cpi-browser.ts:55-56` | `browser.newContext`, `context.newPage` | nenhum | travamento | baixa | E3 |
+| W9 | `src/main/cpi/cpi-browser.ts:44` | `page.bringToFront` | nenhum | travamento | baixa | E3 |
+| W10 | `src/main/cpi/cpi-browser.ts:548` (chamado por `index.ts:726`, `:758` e `cpi-browser.ts:48`) | `browser.close()` | nenhum em `cpi:close`, `auth:logout` e reabertura; 60 s só no encerramento (`index.ts:818`) | travamento | média | E3 |
+| W11 | `src/main/cpi/cpi-browser.ts:150-173` | abrir detalhe: `buttons.count()` + `button.evaluate` por botão + polling | laço com prazo de 20 s, mas cada `evaluate`/`frame.evaluate` interno não tem limite | travamento | média | E3 |
+| W12 | `src/main/cpi/cpi-browser.ts:206-218` | `readDetailFrame`: `isVisible`, `elementHandle` (500 ms), `contentFrame`, `frame.evaluate` | `frame.evaluate` sem limite | travamento | média | E3 |
+| W13 | `src/main/cpi/cpi-browser.ts:364-382` | preencher: `selects.count()`, `element.evaluate`, `selectOption` (10 s) | `evaluate` só com o padrão de 30 s | travamento | baixa | E3 |
+| W14 | `src/main/cpi/cpi-browser.ts:387-413` | marcar resultado: `evaluateAll` em laço com prazo de 12 s | `evaluateAll` sem limite | travamento | média | E3 |
+| W15 | `src/main/cpi/cpi-browser.ts:417-450` | anexo: `waitFor` (12 s), `getAttribute`, `textContent`, `files.evaluate`, `setInputFiles` | `setInputFiles` e `evaluate` com o padrão de 30 s | travamento | baixa | E3 (nunca repetir: efeito possível) |
+| W16 | `src/main/cpi/cpi-browser.ts:505-524` | clique em Alterar e laço de confirmação | prazo de 20 s; `savedResponseEvidence` → `frame.evaluate` sem limite | travamento | média | E3 (timeout → `verification_required`) |
+| W17 | `src/main/cpi/cpi-browser.ts:286` | reconciliação: `frame.goto` | 15 s | travamento | — | aceito (baixo): já limitado |
+| W18 | `src/main/cpi/cpi-browser.ts:304-315` | fechar Shadowbox: `innerText` (4 s), `getAttribute`, `evaluate`, `waitFor hidden` (7 s) | parcial (padrão 30 s nos demais) | travamento | baixa | E3 |
+| W19 | `src/main/cpi/pending-refresh.ts:39-74` | após salvar: `waitFor` (8 s), busca de "Mostrar Tudo" (8 s), `click` (10 s), leitura estável (20 s) | prazos por laço, mas `inspectPendingPerson29Rows` usa `frame.evaluate` sem limite | travamento | média | E3 |
+| W20 | `src/main/cpi/pending-filter.ts:29-39`, `:63-81` | `visibleControl` (12 s) e `readListingCount` (25 s) | prazo por laço; `frame.evaluate` interno sem limite | travamento | média | E3 |
+| W21 | `src/main/cpi/pending-filter.ts:92-127` | filtro 29: `goto` (30 s), cliques (10–15 s), `getAttribute`/`isChecked` (padrão 30 s), `evaluateAll` | `evaluateAll` sem limite | travamento | baixa | E3 |
+| W22 | `src/main/cpi/pending-rows.ts:63-71` | leitura de linhas: `frame.evaluate` por frame | nenhum | travamento | média | E3 |
+| W23 | `src/main/cpi/cpi-browser.ts:79` | inspeção de controles (diagnóstico manual): `evaluateAll` | nenhum | travamento | baixa | E3 (canal só de desenvolvimento em E5) |
+| W24 | `src/main/index.ts:581` | `dialog.showMessageBox` da limpeza, com operação exclusiva, `busy` e `maintenanceActive` presos | espera humana sem limite; o encerramento falha após 60 s com o diálogo aberto | travamento | baixa | E3 (fechamento de diálogos) |
+| W25 | `src/main/settings.ts:22` (via `index.ts:536`) | `dialog.showOpenDialog` dentro de operação exclusiva | espera humana sem limite | travamento | baixa | E3 |
+| W26 | `src/main/index.ts:816-820` | encerramento: `waitForIdle` (60 s) e `history.close()` | `history.close` sem limite (aguarda a fila do SQLite) | travamento | baixa | aceito (baixo): só aguarda operações locais já aceitas; preferir esperar a perder escrita |
+| W27 | `src/main/credentials.ts`, `query-history.ts:134-137`, `cpi/workflow-store.ts:61-84` | DPAPI assíncrono (`safeStorage.*Async`) | nenhum | travamento | baixa | aceito (baixo): chamada local do Windows, sem rede; um timeout aqui deixaria dados sem saber se foram gravados |
+| W28 | `src/main/index.ts:555`, `:560`, `:660`, `:779`, `:789`, `:795` (`shell.openPath`) | abrir PDF/pasta no Windows | nenhum | travamento | baixa | aceito (baixo): ação manual do usuário, fora do FULL AUTO |
+| W29 | `src/main/http-response.ts:22-31` | leitura do corpo em partes | coberto pelo `AbortController` de W1 e pelo limite de 8 MB | — | — | aceito (baixo): já limitado |
+
+## 2. Laços, polling e recursão
+
+Todo laço abaixo tem a condição de parada citada. Os itens marcados como risco têm parada que depende de
+uma espera sem limite (seção 1) ou que contradiz D1.
+
+| ID | Local | Laço | Condição de parada | Risco | Sev. | Etapa |
+|---|---|---|---|---|---|---|
+| L1 | `src/main/cpi/full-auto-runner.ts:58-92` | `cycle()` reagendado por `setTimeout` | `shouldRun=false` (pausa, erro ou item em revisão) | loop | — | E2 (parada verificável já existe; ver L2) |
+| L2 | `src/main/index.ts:112-120` + `full-cycle.ts:43-46` + `full-auto-runner.ts:64-70` | seleção do próximo item | pega o **primeiro item não concluído**, inclusive `review_required`/`verification_required`; o ciclo devolve `review_required` e o runner **pausa**. A cada novo início o mesmo item volta e pausa de novo: a fila fica bloqueada por um único item | loop | **alta** | E2 (pular itens em revisão; falha de item não para o agente) |
+| L3 | `src/main/index.ts:112-120` + `full-cycle.ts:85-87` | item em `query_pending` | volta a ser escolhido a cada ciclo e executa `fetchByCode` (W2, até ≈ 16 min) com o modal aberto | loop / travamento | **alta** | E2 + E3 |
+| L4 | `src/main/cpi/full-auto-runner.ts:12-15` | atraso entre ciclos | 2 s se houve conclusão e restam itens; senão o intervalo (≥ 30 s). Sem espera crescente com fila vazia | desempenho | baixa | E2 (espera crescente de 30 s a 5 min) |
+| L5 | `src/main/cpi/pending-monitor.ts:91-137` | monitor de contagem CPI | `running`/`generation`; para em erro ou ao encontrar itens | loop | — | aceito (baixo): parada clara; avaliar remoção do monitor legado em E2 |
+| L6 | `src/main/pending-queries.ts:50-87` | GET de consultas pendentes | `attempts ≥ 40`, `failures ≥ 3` ou erro permanente; reagenda a cada 2 s enquanto houver 2 GETs em curso (`:53`) | loop | baixa | aceito (baixo): limites explícitos; o reagendamento de 2 s termina quando um GET termina (cada GET tem 35 s) |
+| L7 | `src/main/deskdata-client.ts:91` | polling de resultado | 24 tentativas | loop | — | E3 (já limitado; falta cancelamento — W2) |
+| L8 | `src/main/cpi/cpi-browser.ts:171`, `:387`, `:513`; `pending-refresh.ts:42`, `:56`; `pending-filter.ts:31`, `:65` | polling do DOM com `Date.now() < deadline` | prazo de 8–25 s, conferido só entre iterações | loop | média | E3 (cada iteração precisa de limite: W11–W22) |
+| L9 | `src/main/pdf-render.ts:28` | nomes `-02`…`-100` | 100 tentativas | loop | — | E1 (novo padrão `-NN`) |
+| L10 | `src/main/http-response.ts:22` | `for(;;)` de leitura | fim do stream, limite de 8 MB ou abort | loop | — | aceito (baixo): parada garantida |
+| L11 | `src/main/cpi/pending-filter.ts:111`, `pending-rows.ts:88/128/145`, `cpi-browser.ts:150/364/424` | laços sobre `count()` ou listas do DOM | tamanho finito da coleção | loop | — | aceito (baixo): limitados pelo DOM; o custo por iteração está em W13/W21 |
+| L12 | `src/main/index.ts:263-267` | retomada de pendentes no login | lista finita | loop | — | aceito (baixo); custo em P3 |
+| L13 | `src/renderer/main.tsx:293-295`, `:306` | `setInterval` de 5 s (`cpi:status`) e relógio de 1 s | limpos no `return` do `useEffect` | loop | — | aceito (baixo): `cpi:status` não acessa a rede nem o disco além do log de IPC |
+| L14 | — | recursão | nenhuma recursão síncrona encontrada em `src/main`; a única "recursão" é o reagendamento de L1/L5/L6 | — | — | — |
+
+## 3. Estado de concorrência
+
+| ID | Local | Estado | Observação | Etapa |
+|---|---|---|---|---|
+| C1 | `src/main/index.ts:62` | `busy` | verificado e alterado manualmente em ~20 handlers; redundante dentro de canais já exclusivos (ex.: `cpiScanOneTimed` `:97`) | E4 |
+| C2 | `src/main/index.ts:70` | `maintenanceActive` | só a limpeza; bloqueia `completePending` (`:243`) | E4 |
+| C3 | `src/main/index.ts:71` | `sessionTransitionActive` | login/logout; `account()` lança durante a troca | E4 |
+| C4 | `src/main/index.ts:802-803` | `shutdownRequested`, `shutdownReady` | encerramento; `shutdownRequested` volta a `false` se falhar | E4 |
+| C5 | `src/main/operations.ts:2-46` | `ApplicationOperations` (`exclusive`, `reservation`, `closing`, `active`) | exclusão por canal (`exclusiveChannels`, `index.ts:45-51`) e `runExclusiveAfter` para `cpi:close`/`auth:logout` | E4 |
+| C6 | `src/main/index.ts:75` | `activeCompletions` | recuperações de consultas pendentes aguardadas na limpeza, no login/logout e no encerramento | E4 |
+| C7 | `src/main/index.ts:525-528` | `PendingQueryMonitor.complete` roda como operação **não exclusiva**: gera PDF e altera `lastSavedPdf` em paralelo a uma operação exclusiva (inclusive um ciclo CPI) | risco de corrida | E4 |
+| C8 | `src/main/cpi/full-auto-runner.ts:32-34` | `shouldRun`, `current`, `timer` | `pause()` aguarda o ciclo em curso **sem limite** (`:53`) | E2 (pausa em até um ciclo, com cancelamento) |
+| C9 | `src/main/cpi/pending-monitor.ts:37-40` | `running`, `inFlight`, `generation` | `stopAndWait()` aguarda `inFlight` sem limite (`:88`) | E2 |
+| C10 | `src/main/index.ts:165-175`, `:726`, `:756-757` | pausa do runner e do monitor feita duas vezes (no `bind` e no handler) em `cpi:close` e `auth:logout` | redundância, sem efeito incorreto | E4 |
+| C11 | `src/main/backup.ts:30`, `maintenance.ts:17`, `cpi/cpi-browser.ts:27` (`opening`) | flags locais (`creating`, `cleaning`, `opening`) | protegem contra reentrada na própria classe | E4 (absorver no `OperationGate`) |
+| C12 | `query-history.ts:51-53`, `cpi/workflow-store.ts:56`, `account-approval.ts:13`, `diagnostics.ts:8` | filas internas de serialização (`mutation`, `queue`) | serializam escrita de cada store; não são estado global de operação | aceito (baixo): manter fora do `OperationGate`; são locks de dados, não de fluxo |
+| C13 | `src/main/index.ts:537` (`settings:approve`) | `settings:approve` não é exclusivo | alterar a autorização durante um ciclo: o ciclo confere `paidApproved` e o saldo imediatamente antes do POST (`full-cycle.ts:59-63`) | aceito (baixo): a conferência fica no ponto do efeito |
+
+## 4. Bloqueios do processo principal
+
+| ID | Local | Operação | Custo | Risco | Sev. | Etapa |
+|---|---|---|---|---|---|---|
+| P1 | `src/main/cpi/workflow-store.ts:61-84`, `:109-112` | cada `get`/`claim`/`mark` lê, decifra (DPAPI) e valida o arquivo inteiro (até 10.000 itens); cada `mark` regrava tudo | O(n) por operação | desempenho | média | E2 |
+| P2 | `src/main/index.ts:112-120` | seleção do item: até 100 `cpiWorkflow.get` por varredura, cada um com P1 | O(100 × n) por ciclo | desempenho | média | E2 |
+| P3 | `src/main/query-history.ts:167-174` | `list`/`listAll` decifram todas as linhas; usados no login (`index.ts:263`), na limpeza e no backup | O(histórico) | desempenho | baixa | E5 |
+| P4 | `src/main/query-history.ts:238-248` | `removePdfReferences` decifra e recifra todas as linhas | O(histórico) | desempenho | baixa | aceito (baixo): só na limpeza manual |
+| P5 | `src/main/query-history.ts:92-101` | `new DatabaseSync` e `PRAGMA integrity_check` síncronos na inicialização | O(tamanho do banco), uma vez | desempenho | baixa | aceito (baixo): só na primeira operação; garante integridade antes de consultas pagas |
+| P6 | `src/main/query-history.ts:160-196` | `DatabaseSync` (`prepare`/`get`/`run`) síncrono no processo principal | por consulta, com índice | desempenho | baixa | aceito (baixo): consultas indexadas e pontuais; nenhuma em laço no FULL AUTO |
+| P7 | `src/main/backup.ts:10`, `:17` | `crc32` em JS byte a byte e `deflateRawSync` do snapshot inteiro (até 100 MB) | bloqueia a interface durante o backup | desempenho | média | E5 |
+| P8 | `src/main/index.ts:600-617` | `cpi:history:list`: decifra a fila inteira, até 100 `findById` e `stat`; chamado a cada mudança de `processed` (`renderer/main.tsx:298-302`) | O(n) por item processado | desempenho | média | E2 |
+| P9 | `src/main/diagnostics.ts:23-37` | cada evento faz `mkdir`, `stat`, `appendFile`, `readdir` e `stat` de todos os logs | ~6 operações de disco por evento; a Etapa 0 adiciona ~15 eventos por ciclo | desempenho | baixa | aceito (baixo): fila serial assíncrona, ≤ 6 arquivos; não bloqueia o ciclo (gravação sem `await` no ciclo) |
+| P10 | `src/main/index.ts:497` | `mkdirSync` da pasta de dados | uma vez, antes da janela | desempenho | — | aceito (baixo) |
+| P11 | `src/main/settings.ts:8-16` | `getSettings` lê `settings.json` a cada chamada | arquivo pequeno | desempenho | — | aceito (baixo) |
+
+## 5. Limites de quantidade residuais (D1)
+
+| ID | Local | Limite | Etapa |
+|---|---|---|---|
+| Q1 | `src/main/cpi/workflow-store.ts:24-25` | `MAX_WORK_ITEMS=10000`: com 10.000 registros na fila, todo o processamento CPI é bloqueado | E2 |
+| Q2 | `src/main/cpi/pending-rows.ts:28`, `:117` | no máximo 100 linhas mapeadas por página; páginas seguintes não são lidas | E2 (avaliar com D1: itens concluídos saem da página, os seguintes sobem) |
+| Q3 | `src/main/index.ts:603` | histórico CPI exibe só os 100 concluídos mais recentes | aceito (baixo): limite de exibição, não de processamento |
+
+## 6. Instrumentação adicionada nesta etapa
+
+Módulo novo: `src/main/step-timing.ts` (`createStepTimer`). Cada ciclo recebe um `correlationId` (UUID v4).
+
+- Evento `timing_step`: `flow`, `correlationId`, `step`, `durationMs`, `state` (`success`/`failed`) e,
+  em falha, `errorType` (nome da classe do erro).
+- Evento `timing_cycle`: `flow`, `correlationId`, `durationMs`, `state` e `outcome`.
+
+| `flow` | Etapas (`step`) | Onde |
+|---|---|---|
+| `cpi` | `cpi_filter`, `cpi_rows`, `cpi_select` | `index.ts` (`cpiScanOneTimed`) |
+| `cpi` | `cpi_open_detail`, `cpi_read_cpf` | `cpi-browser.ts` (`inspectPendingPersonDetails`) |
+| `cpi` | `deskdata_credits`, `deskdata_query` ou `deskdata_fetch`, `report_pdf`, `cpi_close_detail` | `full-cycle.ts` |
+| `cpi` | `cpi_fill`, `cpi_attach`, `cpi_save` | `cpi-browser.ts` (`uploadAndSavePersonResponse`) |
+| `person`, `pis`, `company` | `deskdata_credits`, `deskdata_query`, `deskdata_fetch`, `report_pdf` | `index.ts` (consultas manuais) |
+
+Valores de `outcome`: `completed`, `verification_required`, `review_required`, `pending` (CPI);
+`ready`, `pending`, `no_pis` (manuais); `empty` (filtro sem itens) e `idle` (só itens concluídos na página).
+
+Privacidade: o temporizador só recebe nomes fixos; o `DiagnosticLogger` aceita `flow`, `step` e `outcome`
+apenas de listas fechadas e `correlationId` apenas no formato UUID. CPF, CNPJ, nomes, caminhos de PDF
+e códigos de consulta não entram no evento (testes: `tests/step-timing.test.mjs`,
+`tests/person-report-ipc.test.mjs`). Uma falha ao gravar o diagnóstico nunca interrompe o ciclo.
+
+### Como ler a base de medição
+
+Os logs ficam em `%APPDATA%\deskdata-desktop\logs\app-AAAA-MM-DD.jsonl`. Média e máximo por etapa:
+
+```powershell
+Get-Content "$env:APPDATA\deskdata-desktop\logs\app-*.jsonl" | ConvertFrom-Json |
+  Where-Object event -eq 'timing_step' | Group-Object flow,step |
+  ForEach-Object { [pscustomobject]@{ etapa=$_.Name; n=$_.Count;
+    media_ms=[int]($_.Group | Measure-Object durationMs -Average).Average;
+    max_ms=($_.Group | Measure-Object durationMs -Maximum).Maximum;
+    falhas=@($_.Group | Where-Object state -eq 'failed').Count } }
+```
+
+Os valores de referência só existem depois de ciclos reais (Etapa 6). Nesta etapa, nenhuma consulta
+real foi executada; a medição foi comprovada com fakes nos testes.
+
+## 7. Resumo por etapa
+
+| Etapa | Itens |
+|---|---|
+| E1 | L9 |
+| E2 | L1, L2, L3, L4, C8, C9, P1, P2, P8, Q1, Q2 |
+| E3 | W1–W4, W6, W8–W16, W18–W25, L3, L7, L8 |
+| E4 | C1–C7, C10, C11 |
+| E5 | P3, P7 (e o canal de inspeção de W23) |
+| Resolvido | W5 (PR #12) |
+| Aceito (baixo) | W7, W17, W26–W29, L5, L6, L10–L13, C12, C13, P4–P6, P9–P11, Q3 |
+
+Prioridade sugerida pela severidade: L2 e L3 (fila bloqueada por um item e `fetchByCode` longo dentro do
+ciclo) e W2/W3 (polling de ≈ 16 min sem cancelamento) são os principais candidatos a "travamento" do FULL AUTO.
