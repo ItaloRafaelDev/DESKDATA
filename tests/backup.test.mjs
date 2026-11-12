@@ -18,5 +18,5 @@ test('backup ZIP armazena apenas históricos e configurações cifradas, nunca c
   assert.match(bytes.toString('latin1'),/history-key\.bin/);
   assert.match(bytes.toString('latin1'),/settings\.bin/);
   assert.equal((await readdir(join(root,'backups'))).length,1);
- }finally{await scope.closeAll();await rm(root,{recursive:true,force:true})}
+ }finally{await scope.closeAll();await rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:100})}
 });

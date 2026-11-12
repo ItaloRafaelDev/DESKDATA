@@ -125,12 +125,16 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
     return outcome(s,'review_required','Falha comprovada antes de anexar ou submeter o formulário. PDF e classificação preservados; revisão manual necessária.');
   }
   if(confirmation==='confirmed'||confirmation==='confirmed_auxiliary_404'){
-    await s.mark('completed');
+    // O envio remoto foi confirmado, mas a finalização local ainda pode falhar.
+    // Persistir uma pendência antes de fechar; nunca liberar reenvio ao retomar.
+    await s.mark('review_required');
     try {
       await s.closeCompletedDetail();
+      await s.mark('completed');
     } catch {
-      // A resposta já está concluída no histórico local. Não reenviar; aguardar fechamento manual.
-      return outcome(s,'review_required','Resposta salva, mas o fechamento ou a atualização da listagem CPI não foi confirmado. Verificação manual necessária; não reenviar.');
+      // Falha no fechamento, atualização da listagem ou persistência da conclusão:
+      // manter a pendência visível e impedir segundo envio.
+      return outcome(s,'review_required','Resposta salva, mas o fechamento ou o registro da conclusão CPI não foi confirmado. Verificação manual necessária; não reenviar.');
     }
     if(confirmation==='confirmed_auxiliary_404')return outcome(s,'completed',
       'Resposta CPI confirmada e janela fechada; erro 404 do recurso auxiliar cpi_api_request.aspx observado. Verificar a integracao externa.',

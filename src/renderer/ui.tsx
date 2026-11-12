@@ -24,11 +24,13 @@ export function Icon({name,size=18}: {name:IconName;size?:number}){
 }
 export interface Notification {id:number;text:string;type:NoticeKind}
 export function ToastHost({notice,onDismiss}:{notice:Notification|null;onDismiss:()=>void}){
+  const noticeId=notice?.id;
+  const noticeType=notice?.type;
   useEffect(()=>{
-    if(!notice)return;
-    const timer=window.setTimeout(onDismiss,notificationDuration(notice.type));
+    if(noticeId===undefined || noticeType===undefined)return;
+    const timer=window.setTimeout(onDismiss,notificationDuration(noticeType));
     return ()=>window.clearTimeout(timer);
-  },[notice?.id,onDismiss]);
+  },[noticeId,noticeType,onDismiss]);
   if(!notice)return null;
   return <div className="notification-region" aria-live={notice.type==='error'?'assertive':'polite'}>
     <div className={`notification ${notice.type}`} role={notice.type==='error'?'alert':'status'}>

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { executeCpiPersonCycle } from '../src/main/cpi/full-cycle.ts';
 import { tmpdir } from 'node:os';
+import { CpiWorkflowStore } from '../src/main/cpi/workflow-store.ts';
 
 // CPF fictício válido apenas para testes locais.
 const CPF='52998224725';
@@ -75,7 +76,8 @@ test('ciclo completo simulado: um POST, PDF correto, resposta Há Informações 
     assert.equal(result.state,'completed');assert.equal(uploadCount,1);
     assert.equal(events.filter(e=>e==='reserved').length,1);
     assert.ok(events.indexOf('submit_started')<events.indexOf('completed'));
-    assert.ok(events.indexOf('completed')<events.indexOf('closed_detail'));
+    assert.ok(events.indexOf('review_required')<events.indexOf('closed_detail'));
+    assert.ok(events.indexOf('closed_detail')<events.indexOf('completed'));
     assert.equal(events.filter(e=>e==='closed_detail').length,1);
     const again=await executeCpiPersonCycle(s);
     assert.equal(again.state,'completed');assert.equal(uploadCount,1);
@@ -118,9 +120,40 @@ test('resposta persistida com falha no fechamento nao e reenviada e exige revisa
     const result=await executeCpiPersonCycle(s);
     assert.equal(result.state,'review_required');
     assert.equal(uploads,1);assert.equal(closeCalls,1);
-    assert.ok(events.includes('completed'));
+    assert.ok(events.includes('review_required'));
+    assert.equal(events.includes('completed'),false);
     const second=await executeCpiPersonCycle(s);
-    assert.equal(second.state,'completed');
+    assert.equal(second.state,'review_required');
     assert.equal(uploads,1);assert.equal(closeCalls,1);
   }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('falha no fechamento persiste pendência após reinício e impede segundo envio',async()=>{
+  const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-close-store-')));
+  const account='test@example.invalid';
+  const protector={isAvailable:async()=>true,encrypt:async text=>Buffer.from(text),decrypt:async bytes=>({result:bytes.toString()})};
+  try{
+    let store=new CpiWorkflowStore(dir,protector),uploads=0;
+    const {s}=services({
+      outputFolder:dir,
+      getJob:()=>store.get(account,ids),
+      claim:()=>store.claim(account,ids),
+      mark:(stage,updates)=>store.mark(account,ids,stage,updates),
+      savePdf:async cpf=>{
+        const path=join(dir,`RELATORIO_${cpf}_2026-11-10.pdf`);
+        await writeFile(path,'%PDF-1.4\n'+'x'.repeat(150));
+        const record=await s.findLatest(cpf);record.status='ready';record.pdfPaths=[path];
+      },
+      uploadAndSave:async()=>{uploads++;return 'confirmed';},
+      closeCompletedDetail:async()=>{throw Error('Fechamento do modal indisponível');}
+    });
+    assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
+    assert.equal((await store.get(account,ids)).stage,'review_required');
+    assert.equal((await store.listPending(account,0,10)).total,1);
+    store=new CpiWorkflowStore(dir,protector);
+    s.getCpf=async()=>{throw Error('Não reabrir solicitação respondida');};
+    assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
+    assert.equal(uploads,1);
+    assert.equal((await store.get(account,ids)).stage,'review_required');
+  }finally{await rm(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
 });
