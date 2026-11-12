@@ -1,6 +1,7 @@
 import { writeFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { QueryOutcome } from '../shared/types.ts';
+import { PDF_MAX_COPIES_PER_DAY } from './pdf-names.ts';
 
 /** Tempo máximo para carregar o HTML, aguardar fontes e gerar o PDF. */
 export const PDF_RENDER_TIMEOUT_MS=120_000;
@@ -25,7 +26,8 @@ export function withPrintCsp(html:string):string{
 
 async function writeUnique(folder:string, basename:string, pdf:Buffer):Promise<string>{
   await stat(folder).then(s=>{if(!s.isDirectory())throw new Error('Destino não é uma pasta.');});
-  for(let i=0;i<100;i++){
+  // Primeiro arquivo sem sufixo; regerações no mesmo dia recebem -02 a -99 (formato -NN), nunca sobrescrevem.
+  for(let i=0;i<PDF_MAX_COPIES_PER_DAY;i++){
     const suffix=i===0?'':`-${String(i+1).padStart(2,'0')}`;
     const path=join(folder,`${basename}${suffix}.pdf`);
     try{await writeFile(path,pdf,{flag:'wx'});return path;}catch(e){if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e;}

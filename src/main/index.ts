@@ -26,10 +26,11 @@ import { normalizeCompanyResponse } from '../shared/company-report.ts';
 import { isValidCpf, cpfDigits } from '../shared/cpf.ts';
 import { assertRecoveredCpf } from '../shared/query-identity.ts';
 import { PersonReportService, type ReceivedPersonQuery } from './person-reports.ts';
-import type { QueryOutcome, QueryExecution, QueryUpdate, PisQueryExecution } from '../shared/types.ts';
+import type { QueryOutcome, QueryExecution, QueryUpdate, PisQueryExecution, NormalizedData } from '../shared/types.ts';
 import { DeskdataClient } from './deskdata-client.ts';
 import { chooseFolder, getSettings } from './settings.ts';
-import { saveCompanyReportPdf, saveReportPdf, savePisReportPdf } from './pdf.ts';
+import { saveCompanyReportPdf, saveCpiReportPdf, saveReportPdf, savePisReportPdf } from './pdf.ts';
+import { normalizeDeskdataResponse } from '../shared/normalizer.ts';
 import { resolvePisOutcome } from './pis-outcome.ts';
 import { CredentialStore } from './credentials.ts';
 import { AccountApprovalStore } from './account-approval.ts';
@@ -134,15 +135,7 @@ async function cpiScanOneTimed(timer:StepTimer):Promise<CpiScanResult>{
       paidApproved:()=>approvals.isApproved(who),
       submitCpf:(cpf,onCode)=>client.submitCpf(cpf,onCode),
       fetchByCode:code=>client.fetchByCode(code),
-      savePdf:async(cpf,recordId,code,data)=>{
-        const identity={account:who,kind:'person' as const,document:cpf,queryCode:code};
-        const record=await history.findById(who,recordId);
-        if(!record)throw new Error('Registro CPI indisponível no histórico desta conta.');
-        assertQueryRecordIdentity(record,identity);
-        const outcome=await saveReportPdf(settings.outputFolder!,{cpf,consultedAt:new Date().toISOString(),queryCode:code,data});
-        await history.addPdf(recordId,outcome.path,identity);
-        showHistoryChange({kind:'person',recordId,state:'ready'});
-      },
+      savePdf:(cpf,recordId,code,data)=>saveCpiPdf(who,target,settings.outputFolder!,cpf,recordId,code,data),
       uploadAndSave:async(pdf,result)=>{
         if(sessionAccount!==who)throw new Error('Conta Deskdata alterada durante o processamento CPI.');
         return cpiBrowser.uploadAndSavePersonResponse(target,pdf,result,undefined,timer);
@@ -152,6 +145,17 @@ async function cpiScanOneTimed(timer:StepTimer):Promise<CpiScanResult>{
     if(sessionAccount!==who)throw new Error('Conta Deskdata alterada durante o processamento CPI.');
     return {found:filtered.total,outcomes:[result]};
   }finally{busy=false;}
+}
+
+/** Gera o PDF CPI_<pesquisaId>_<solicitacaoId>_<data>.pdf e o registra na consulta, conferindo conta, CPF e código. */
+async function saveCpiPdf(who:string,ids:CpiPendingRowId,folder:string,cpf:string,recordId:string,code:string|undefined,data:NormalizedData):Promise<void>{
+  const identity={account:who,kind:'person' as const,document:cpf,queryCode:code};
+  const record=await history.findById(who,recordId);
+  if(!record)throw new Error('Registro CPI indisponível no histórico desta conta.');
+  assertQueryRecordIdentity(record,identity);
+  const outcome=await saveCpiReportPdf(folder,{cpf,consultedAt:new Date().toISOString(),queryCode:code,data},ids);
+  await history.addPdf(recordId,outcome.path,identity);
+  showHistoryChange({kind:'person',recordId,state:'ready'});
 }
 
 function guard(event:IpcMainInvokeEvent):void {
@@ -348,7 +352,7 @@ async function exportPis(cpf:string,payload:unknown,recordId:string,queryCode?:s
     save:async(record)=>{
       const folder=(await getSettings()).outputFolder;
       if(!folder)throw new Error('Configure a pasta de destino antes de consultar.');
-      const outcome=await savePisReportPdf(folder,record,cpf,queryCode);
+      const outcome=await savePisReportPdf(folder,record,queryCode);
       await history.addPdf(recordId,outcome.path);
       lastPisResponse={cpf,payload,queryCode}; // somente memória, sem persistir JSON pessoal
       return outcome;
@@ -638,7 +642,7 @@ if(instanceLock)app.whenReady().then(()=>{
         if(!record||record.account!==who||(record.kind!==undefined&&record.kind!=='person')||record.status!=='ready'||!isValidCpf(record.cpf))return {ready:false};
         const folder=(await getSettings()).outputFolder;
         if(!folder)return {ready:false};
-        try{await findCpiPersonPdf(record,record.cpf,folder);return {ready:true,cpf:record.cpf};}
+        try{await findCpiPersonPdf(record,record.cpf,folder,ids);return {ready:true,cpf:record.cpf};}
         catch{return {ready:false};}
       },
       inspectRemote:(target,classification,cpf)=>cpiBrowser.inspectPersistedPersonResponse(target,classification,cpf)
@@ -710,10 +714,16 @@ if(instanceLock)app.whenReady().then(()=>{
       const prepared=await prepareCpiPersonPdf({
         ids,account:accountId,cpf,outputFolder,
         findLatest:(who,document,kind)=>history.findLatest(who,document,kind),
-        recoverExisting:async record=>{
-          // resolveRecorded executa somente GET de codigo ja registrado.
-          const recovered=await resolveRecorded(record);
-          return {state:recovered.state};
+        regenerateCpiPdf:async record=>{
+          // Somente GET do codigo ja registrado; nenhum POST. O PDF regerado recebe o nome CPI desta pesquisa.
+          const code=record.queryCode;
+          if(!code||!outputFolder)throw new Error('Consulta sem codigo recuperavel ou pasta ausente; nenhum POST sera enviado.');
+          if(monitor.isWatching(record.id))return {state:'pending'};
+          const received=await client.checkByCode(code);
+          if(received.state==='pending'){await pending(record);return {state:'pending'};}
+          assertRecoveredCpf(received.payload,cpf);
+          await saveCpiPdf(accountId,ids,outputFolder,cpf,record.id,code,normalizeDeskdataResponse(received.payload));
+          return {state:'ready'};
         }
       });
       if(sessionAccount!==accountId)throw new Error('Sessao Deskdata alterada durante a preparacao.');

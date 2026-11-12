@@ -63,7 +63,7 @@ test('ciclo completo simulado: um POST, PDF correto, resposta Há Informações 
     const {s,events}=services({
       outputFolder:dir,
       savePdf:async(cpf,_recordId,_code,_data)=>{
-        savedPath=join(dir,`RELATORIO_${cpf}_2026-11-10.pdf`);
+        savedPath=join(dir,'CPI_573987_275064_2026-11-10.pdf');
         await writeFile(savedPath,'%PDF-1.4\n'+'x'.repeat(150));
         const record=await s.findLatest(cpf);
         record.status='ready';record.pdfPaths=[savedPath];
@@ -91,7 +91,7 @@ test('ciclo completo mede consulta, PDF e fechamento na ordem, sem receber CPF',
       outputFolder:dir,
       timer:{step:async(name,work)=>{assert.equal(typeof name,'string');steps.push(name);return work();}},
       savePdf:async cpf=>{
-        const path=join(dir,`RELATORIO_${cpf}_2026-11-10.pdf`);
+        const path=join(dir,'CPI_573987_275064_2026-11-10.pdf');
         await writeFile(path,'%PDF-1.4\n'+'x'.repeat(150));
         const latest=await s.findLatest(cpf);latest.status='ready';latest.pdfPaths=[path];
       }
@@ -110,6 +110,36 @@ test('consulta existente mede o GET por código, nunca um POST',async()=>{
   assert.deepEqual(steps,['deskdata_fetch','report_pdf']);
 });
 
+test('PDF legado não é enviado: o ciclo regera o PDF CPI por GET, sem novo POST',async()=>{
+  const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-legacy-')));
+  try{
+    const legacy=join(dir,`RELATORIO_${CPF}_2026-11-01.pdf`),fresh=join(dir,'CPI_573987_275064_2026-11-12.pdf');
+    await writeFile(legacy,'%PDF-1.4\n'+'legado'.repeat(40));
+    let fetched=0,uploaded=null;
+    const {s,setRecord}=services({outputFolder:dir,
+      submitCpf:async()=>{throw Error('POST indevido');},getCredits:async()=>{throw Error('Saldo indevido');},
+      fetchByCode:async()=>{fetched++;return {queryCode:'Q-AAAAAAAAAA',payload:data};},
+      savePdf:async cpf=>{await writeFile(fresh,'%PDF-1.4\n'+'x'.repeat(150));const r=await s.findLatest(cpf);r.pdfPaths.push(fresh);},
+      uploadAndSave:async path=>{uploaded=path;return 'confirmed';}});
+    setRecord({id:'123e4567-e89b-12d3-a456-426614174000',kind:'person',cpf:CPF,account:s.account,status:'ready',queryCode:'Q-AAAAAAAAAA',pdfPaths:[legacy]});
+    assert.equal((await executeCpiPersonCycle(s)).state,'completed');
+    assert.equal(fetched,1);assert.equal(uploaded,fresh);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('PDF gerado com nome de outra pesquisa bloqueia o envio',async()=>{
+  const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-other-')));
+  try{
+    let uploads=0;
+    const {s,events}=services({outputFolder:dir,
+      savePdf:async cpf=>{const path=join(dir,'CPI_573988_275064_2026-11-12.pdf');await writeFile(path,'%PDF-1.4\n'+'x'.repeat(150));
+        const r=await s.findLatest(cpf);r.status='ready';r.pdfPaths=[path];},
+      uploadAndSave:async()=>{uploads++;return 'confirmed';}});
+    await assert.rejects(executeCpiPersonCycle(s),/PDF correspondente/);
+    assert.equal(uploads,0);assert.equal(events.includes('submit_started'),false);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
 test('processo Criminal vira restrições; envio sem confirmação fica travado',async()=>{
   const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-cycle-')));
   try{
@@ -117,7 +147,7 @@ test('processo Criminal vira restrições; envio sem confirmação fica travado'
     let uploads=0;
     const {s,events}=services({outputFolder:dir,submitCpf:async()=>({state:'ready',payload}),
       savePdf:async(cpf)=>{
-        const path=join(dir,`RELATORIO_${cpf}_2026-11-10.pdf`);
+        const path=join(dir,'CPI_573987_275064_2026-11-10.pdf');
         await writeFile(path,'%PDF-1.4\n'+'x'.repeat(150));
         const latest=await s.findLatest(cpf);latest.status='ready';latest.pdfPaths=[path];
       },
@@ -137,7 +167,7 @@ test('resposta persistida com falha no fechamento nao e reenviada e exige revisa
     let uploads=0,closeCalls=0;
     const {s,events}=services({outputFolder:dir,
       savePdf:async cpf=>{
-        const path=join(dir,`RELATORIO_${cpf}_2026-11-10.pdf`);
+        const path=join(dir,'CPI_573987_275064_2026-11-10.pdf');
         await writeFile(path,'%PDF-1.4\n'+'x'.repeat(150));
         const latest=await s.findLatest(cpf);latest.status='ready';latest.pdfPaths=[path];
       },
@@ -167,7 +197,7 @@ test('falha no fechamento persiste pendência após reinício e impede segundo e
       claim:()=>store.claim(account,ids),
       mark:(stage,updates)=>store.mark(account,ids,stage,updates),
       savePdf:async cpf=>{
-        const path=join(dir,`RELATORIO_${cpf}_2026-11-10.pdf`);
+        const path=join(dir,'CPI_573987_275064_2026-11-10.pdf');
         await writeFile(path,'%PDF-1.4\n'+'x'.repeat(150));
         const record=await s.findLatest(cpf);record.status='ready';record.pdfPaths=[path];
       },

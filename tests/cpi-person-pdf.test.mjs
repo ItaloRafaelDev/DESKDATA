@@ -6,32 +6,50 @@ import { join } from 'node:path';
 import { findCpiPersonPdf } from '../src/main/cpi/person-pdf.ts';
 
 const cpf='52998224725';
+const ids={pesquisaId:'537987',solicitacaoId:'275064'};
+const NAME='CPI_537987_275064_2026-11-12.pdf';
 const pdfData=Buffer.concat([Buffer.from('%PDF-1.7\n'),Buffer.alloc(256,65)]);
 function record(paths,overrides={}){return {id:'123',kind:'person',account:'a@example.com',cpf,requestedAt:'2026-11-04',updatedAt:'2026-11-04',status:'ready',pdfPaths:paths,...overrides};}
 async function withTemp(callback){const root=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-pdf-')));try{await callback(root);}finally{await rm(root,{force:true,recursive:true});}}
-test('CPI: PDF registrado, com nome/CPF correspondente e assinatura válida',()=>withTemp(async root=>{
- const path=join(root,`RELATORIO_${cpf}_2026-11-04.pdf`);await writeFile(path,pdfData);
- assert.equal(await findCpiPersonPdf(record([path]),cpf,root),path);
+test('CPI: PDF registrado, com nome do par pesquisa/solicitação e assinatura válida',()=>withTemp(async root=>{
+ const path=join(root,NAME);await writeFile(path,pdfData);
+ assert.equal(await findCpiPersonPdf(record([path]),cpf,root,ids),path);
+ const regenerated=join(root,'CPI_537987_275064_2026-11-12-02.pdf');await writeFile(regenerated,pdfData);
+ assert.equal(await findCpiPersonPdf(record([path,regenerated]),cpf,root,ids),regenerated);
 }));
-test('CPI: não procura nem envia PDF de outro CPF',()=>withTemp(async root=>{
- const path=join(root,'RELATORIO_11144477735_2026-11-04.pdf');await writeFile(path,pdfData);
- await assert.rejects(findCpiPersonPdf(record([path]),cpf,root),/PDF correspondente/);
+test('CPI: PDF de outro pesquisaId ou outra solicitação é rejeitado',()=>withTemp(async root=>{
+ for(const name of ['CPI_537988_275064_2026-11-12.pdf','CPI_537987_275065_2026-11-12.pdf','CPI_1537987_275064_2026-11-12.pdf']){
+  const path=join(root,name);await writeFile(path,pdfData);
+  await assert.rejects(findCpiPersonPdf(record([path]),cpf,root,ids),/PDF correspondente/,name);
+ }
 }));
-test('CPI: arquivo incorreto ou ausente não é enviado',()=>withTemp(async root=>{
- const path=join(root,`RELATORIO_${cpf}_2026-11-04.pdf`);await writeFile(path,Buffer.alloc(256,66));
- await assert.rejects(findCpiPersonPdf(record([path]),cpf,root),/PDF correspondente/);
+test('CPI: PDF legado (nome com CPF) nunca é aceito para envio',()=>withTemp(async root=>{
+ const legacy=join(root,`RELATORIO_${cpf}_2026-11-04.pdf`);await writeFile(legacy,pdfData);
+ await assert.rejects(findCpiPersonPdf(record([legacy]),cpf,root,ids),/PDF correspondente/);
+}));
+test('CPI: arquivo com nome correto fora do histórico da consulta não é aceito',()=>withTemp(async root=>{
+ await writeFile(join(root,NAME),pdfData);
+ await assert.rejects(findCpiPersonPdf(record([]),cpf,root,ids),/PDF correspondente/);
+}));
+test('CPI: arquivo sem assinatura %PDF- não é enviado',()=>withTemp(async root=>{
+ const path=join(root,NAME);await writeFile(path,Buffer.alloc(256,66));
+ await assert.rejects(findCpiPersonPdf(record([path]),cpf,root,ids),/PDF correspondente/);
 }));
 test('CPI: consulta pendente ou CPF diferente bloqueia anexo',()=>withTemp(async root=>{
- const path=join(root,`RELATORIO_${cpf}_2026-11-04.pdf`);await writeFile(path,pdfData);
- await assert.rejects(findCpiPersonPdf(record([path],{status:'pending'}),cpf,root),/não está pronta/);
- await assert.rejects(findCpiPersonPdf(record([path],{cpf:'11144477735'}),cpf,root),/não está pronta/);
+ const path=join(root,NAME);await writeFile(path,pdfData);
+ await assert.rejects(findCpiPersonPdf(record([path],{status:'pending'}),cpf,root,ids),/não está pronta/);
+ await assert.rejects(findCpiPersonPdf(record([path],{cpf:'11144477735'}),cpf,root,ids),/não está pronta/);
+}));
+test('CPI: identificadores inválidos bloqueiam a validação',()=>withTemp(async root=>{
+ const path=join(root,NAME);await writeFile(path,pdfData);
+ await assert.rejects(findCpiPersonPdf(record([path]),cpf,root,{pesquisaId:'29',solicitacaoId:'x'}),/inválid/);
 }));
 test('CPI: rejeita documentos fora da pasta configurada, inclusive via link de diretório',()=>withTemp(async root=>{
  const inFolder=join(root,'out');await mkdir(inFolder);
  const outsideFolder=join(root,'outside');await mkdir(outsideFolder);
- const outside=join(outsideFolder,`RELATORIO_${cpf}_2026-11-04.pdf`);await writeFile(outside,pdfData);
- await assert.rejects(findCpiPersonPdf(record([outside]),cpf,inFolder),/PDF correspondente/);
+ const outside=join(outsideFolder,NAME);await writeFile(outside,pdfData);
+ await assert.rejects(findCpiPersonPdf(record([outside]),cpf,inFolder,ids),/PDF correspondente/);
  const link=join(inFolder,'linked');await symlink(outsideFolder,link,process.platform==='win32'?'junction':'dir');
- const linked=join(link,`RELATORIO_${cpf}_2026-11-04.pdf`);
- await assert.rejects(findCpiPersonPdf(record([linked]),cpf,inFolder),/PDF correspondente/);
+ const linked=join(link,NAME);
+ await assert.rejects(findCpiPersonPdf(record([linked]),cpf,inFolder,ids),/PDF correspondente/);
 }));

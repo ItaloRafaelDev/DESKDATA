@@ -67,7 +67,7 @@ uma espera sem limite (seção 1) ou que contradiz D1.
 | L6 | `src/main/pending-queries.ts:50-87` | GET de consultas pendentes | `attempts ≥ 40`, `failures ≥ 3` ou erro permanente; reagenda a cada 2 s enquanto houver 2 GETs em curso (`:53`) | loop | baixa | aceito (baixo): limites explícitos; o reagendamento de 2 s termina quando um GET termina (cada GET tem 35 s) |
 | L7 | `src/main/deskdata-client.ts:91` | polling de resultado | 24 tentativas | loop | — | E3 (já limitado; falta cancelamento — W2) |
 | L8 | `src/main/cpi/cpi-browser.ts:171`, `:387`, `:513`; `pending-refresh.ts:42`, `:56`; `pending-filter.ts:31`, `:65` | polling do DOM com `Date.now() < deadline` | prazo de 8–25 s, conferido só entre iterações | loop | média | E3 (cada iteração precisa de limite: W11–W22) |
-| L9 | `src/main/pdf-render.ts:28` | nomes `-02`…`-100` | 100 tentativas | loop | — | E1 (novo padrão `-NN`) |
+| L9 | `src/main/pdf-render.ts:28` | nomes `-02`…`-100` | 99 tentativas (`-02` a `-99`) | loop | — | **resolvido na E1** (padrão `-NN`, `PDF_MAX_COPIES_PER_DAY`) |
 | L10 | `src/main/http-response.ts:22` | `for(;;)` de leitura | fim do stream, limite de 8 MB ou abort | loop | — | aceito (baixo): parada garantida |
 | L11 | `src/main/cpi/pending-filter.ts:111`, `pending-rows.ts:88/128/145`, `cpi-browser.ts:150/364/424` | laços sobre `count()` ou listas do DOM | tamanho finito da coleção | loop | — | aceito (baixo): limitados pelo DOM; o custo por iteração está em W13/W21 |
 | L12 | `src/main/index.ts:263-267` | retomada de pendentes no login | lista finita | loop | — | aceito (baixo); custo em P3 |
@@ -165,7 +165,7 @@ real foi executada; a medição foi comprovada com fakes nos testes.
 | E3 | W1–W4, W6, W8–W16, W18–W25, L3, L7, L8 |
 | E4 | C1–C7, C10, C11 |
 | E5 | P3, P7 (e o canal de inspeção de W23) |
-| Resolvido | W5 (PR #12) |
+| Resolvido | W5 (PR #12), L9 (E1) |
 | Aceito (baixo) | W7, W17, W26–W29, L5, L6, L10–L13, C12, C13, P4–P6, P9–P11, Q3 |
 
 Prioridade sugerida pela severidade: L2 e L3 (fila bloqueada por um item e `fetchByCode` longo dentro do

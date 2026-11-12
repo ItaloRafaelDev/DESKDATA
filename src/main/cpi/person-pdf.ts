@@ -2,10 +2,18 @@ import { open, realpath, stat } from 'node:fs/promises';
 import { basename, relative, isAbsolute, sep } from 'node:path';
 import { cpfDigits, isValidCpf } from '../../shared/cpf.ts';
 import type { QueryRecord } from '../query-history.ts';
+import { cpiPdfPattern } from '../pdf-names.ts';
+import { validateCpiRowId, type CpiPendingRowId } from './pending-rows.ts';
 
-/** Nunca varre a pasta por nome ou escolhe o PDF mais recente de outra consulta. */
-export async function findCpiPersonPdf(record: QueryRecord | null, cpf: string, configuredFolder: string): Promise<string> {
+/**
+ * Único PDF aceito para anexar na CPI. Exige todas as condições:
+ * nome CPI_<pesquisaId>_<solicitacaoId>_<data> do item em processamento; caminho registrado na consulta
+ * vinculada; arquivo dentro da pasta configurada (caminho canônico); assinatura %PDF-.
+ * PDFs legados (nome com CPF) nunca são aceitos. Nunca varre a pasta nem escolhe PDF de outra consulta.
+ */
+export async function findCpiPersonPdf(record: QueryRecord | null, cpf: string, configuredFolder: string, ids: CpiPendingRowId): Promise<string> {
   if (!isValidCpf(cpf)) throw new Error('CPF da solicitação CPI inválido.');
+  if (!validateCpiRowId(ids)) throw new Error('Identificadores CPI inválidos para validar o PDF.');
   const document = cpfDigits(cpf);
   if (!record || (record.kind !== undefined && record.kind !== 'person') ||
       record.cpf !== document || record.status !== 'ready') {
@@ -14,7 +22,7 @@ export async function findCpiPersonPdf(record: QueryRecord | null, cpf: string, 
   if (!configuredFolder || !isAbsolute(configuredFolder)) throw new Error('Pasta de PDFs não configurada.');
   const root = await realpath(configuredFolder);
   if (!(await stat(root)).isDirectory()) throw new Error('Pasta de PDFs inválida.');
-  const namePattern = new RegExp(`^RELATORIO_${document}_\\d{4}-\\d{2}-\\d{2}(?:-\\d{2})?\\.pdf$`, 'i');
+  const namePattern = cpiPdfPattern(ids);
   // A primeira referência válida é a mais recente registrada na consulta específica.
   for (const path of [...record.pdfPaths].reverse()) {
     if (!isAbsolute(path) || !namePattern.test(basename(path))) continue;

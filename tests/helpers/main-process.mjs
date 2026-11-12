@@ -75,8 +75,11 @@ export async function withMainProcess(submitCpf,run,options={}){
       async preview(){return {recordCount:0,pdfCount:0,pendingCount:0};}
       clean(selection){return options.maintenance(selection);}
     }}}:{}),
-    './pdf.ts':{saveReportPdf:async(_folder,report)=>({path:join(root,`RELATORIO_${report.cpf}_${++renderCount}.pdf`),
-      queryCode:report.queryCode,savedAt:'2026-11-11T00:00:00Z'})},
+    './pdf.ts':{
+      saveReportPdf:async(_folder,report)=>({path:join(root,`RELATORIO_${report.queryCode??'SEM-CODIGO'}_${++renderCount}.pdf`),
+        queryCode:report.queryCode,savedAt:'2026-11-11T00:00:00Z'}),
+      saveCpiReportPdf:async(_folder,report,ids)=>({path:join(root,`CPI_${ids.pesquisaId}_${ids.solicitacaoId}_${++renderCount}.pdf`),
+        queryCode:report.queryCode,savedAt:'2026-11-11T00:00:00Z'})},
     './diagnostics.ts':{DiagnosticLogger:class {async write(event,fields={}){diagnostics.push({event,...fields});}}}
   };
   try{

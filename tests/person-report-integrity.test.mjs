@@ -23,7 +23,7 @@ async function fixture(run){
       savePdf:async(_folder,report)=>{
         renders++;
         await beforeReturn();
-        return {path:join(dir,`RELATORIO_${report.cpf}_${renders}.pdf`),savedAt:'2026-11-11T00:00:00Z',queryCode:report.queryCode};
+        return {path:join(dir,`RELATORIO_${report.queryCode??'SEM-CODIGO'}_${renders}.pdf`),savedAt:'2026-11-11T00:00:00Z',queryCode:report.queryCode};
       }});
     const begin=async(cpf,code)=>{const row=await history.begin(ACCOUNT,cpf);if(code)await history.setCode(row.id,code);return row;};
     const received=(row,cpf,code)=>({account:ACCOUNT,recordId:row.id,cpf,queryCode:code,consultedAt:'2026-11-11T00:00:00Z',payload:payload(cpf)});

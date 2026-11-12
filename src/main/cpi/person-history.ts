@@ -38,7 +38,8 @@ export async function inspectCpiPersonHistory(args: {
   if (latest.status !== 'ready') return { ...base, state: 'not_ready', recordDate };
   if (!outputFolder) return { ...base, state: 'folder_unconfigured', recordDate };
   try {
-    await findCpiPersonPdf(latest, cpf, outputFolder);
+    // Só conta o PDF CPI desta pesquisa; PDFs legados ou de outra pesquisa não são reutilizáveis.
+    await findCpiPersonPdf(latest, cpf, outputFolder, { pesquisaId, solicitacaoId });
     return { ...base, state: 'pdf_available', recordDate };
   } catch {
     // Não retornar caminhos do disco, detalhes de arquivo ou informações pessoais.
