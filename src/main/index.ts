@@ -15,6 +15,7 @@ import { CpiFullAutoRunner } from './cpi/full-auto-runner.ts';
 import { executeCpiPersonCycle } from './cpi/full-cycle.ts';
 import type { CpiPendingRowId, CpiPendingWorkflowStage } from '../shared/types.ts';
 import { DiagnosticLogger } from './diagnostics.ts';
+import { createStepTimer, NULL_TIMER, type StepTimer, type TimedFlow, type TimedOutcome } from './step-timing.ts';
 import { extname } from 'node:path';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -76,8 +77,22 @@ let sessionAccount:string|null=null;
 let lastCompanyResponse:{cnpj:string;payload:unknown;queryCode?:string}|null=null;
 let lastPisResponse:{cpf:string;payload:unknown;queryCode?:string}|null=null;
 
+/** Medição por ciclo, gravada no diagnóstico com id de correlação e somente nomes fixos de etapa. */
+function cycleTimer(flow:TimedFlow):StepTimer{
+  return createStepTimer(flow,(event,fields)=>diagnostics?.write(event,fields));
+}
+/** Encerra a medição com o resultado do ciclo; um erro relançado preserva o comportamento original. */
+async function timedCycle<T>(flow:TimedFlow,work:(timer:StepTimer)=>Promise<T>,outcome:(result:T)=>TimedOutcome|undefined):Promise<T>{
+  const timer=cycleTimer(flow);
+  try{const result=await work(timer);timer.finish('success',outcome(result));return result;}
+  catch(error){timer.finish('failed',undefined,error);throw error;}
+}
+type CpiScanResult={found:number;outcomes:import('./cpi/full-cycle.ts').CpiCycleOutcome[]};
+function cpiScanOne():Promise<CpiScanResult>{
+  return timedCycle('cpi',cpiScanOneTimed,result=>result.found===0?'empty':result.outcomes[0]?.state??'idle');
+}
 /** Processa no máximo um item por varredura. O navegador não altera várias pesquisas de uma vez. */
-async function cpiScanOne():Promise<{found:number;outcomes:import('./cpi/full-cycle.ts').CpiCycleOutcome[]}>{
+async function cpiScanOneTimed(timer:StepTimer):Promise<CpiScanResult>{
   const who=account();
   if(busy||maintenanceActive||sessionTransitionActive)throw new Error('Outra operação está em andamento.');
   busy=true;
@@ -85,27 +100,29 @@ async function cpiScanOne():Promise<{found:number;outcomes:import('./cpi/full-cy
     const settings=await getSettings();
     if(!settings.outputFolder)throw new Error('Configure uma pasta de PDFs antes da automação CPI.');
     let filtered: Awaited<ReturnType<CpiBrowser['filterPendingPerson29']>>;
-    try { filtered=await cpiBrowser.filterPendingPerson29(); }
+    try { filtered=await timer.step('cpi_filter',()=>cpiBrowser.filterPendingPerson29()); }
     catch { throw new Error('Etapa filtro CPI 29: falha ao atualizar a listagem.'); }
     if(filtered.state==='unconfirmed'||filtered.total===null)throw new Error('Etapa filtro CPI 29: total nao confirmado no portal.');
     if(filtered.total===0)return {found:0,outcomes:[]};
     let listed: Awaited<ReturnType<CpiBrowser['inspectPendingRows']>>;
-    try { listed=await cpiBrowser.inspectPendingRows(); }
+    try { listed=await timer.step('cpi_rows',()=>cpiBrowser.inspectPendingRows()); }
     catch { throw new Error('Etapa leitura CPI: nao foi possivel inspecionar as linhas apos o filtro.'); }
     if(listed.state!=='mapped'||!listed.rows.length)throw new Error('Etapa leitura CPI: identificadores da listagem nao confirmados.');
+    const rows=listed.rows;
     // Revalidar o CPF dentro do processo principal; o renderer nunca recebe seus dígitos.
-    let ids:import('./cpi/pending-rows.ts').CpiPendingRowId|undefined;
-    for(const candidate of listed.rows){
-      const existing=await cpiWorkflow.get(who,candidate);
-      if(existing?.stage==='completed')continue;
-      ids=candidate;
-      break;
-    }
+    const ids=await timer.step('cpi_select',async()=>{
+      for(const candidate of rows){
+        const existing=await cpiWorkflow.get(who,candidate);
+        if(existing?.stage==='completed')continue;
+        return candidate;
+      }
+      return undefined;
+    });
     if(!ids)return {found:filtered.total,outcomes:[]};
     const target=ids;
     const result=await executeCpiPersonCycle({
-      account:who,ids:target,outputFolder:settings.outputFolder,
-      getCpf:async()=>{await cpiBrowser.inspectPendingPersonDetails(target);return cpiBrowser.readValidatedCpf(target);},
+      account:who,ids:target,outputFolder:settings.outputFolder,timer,
+      getCpf:async()=>{await cpiBrowser.inspectPendingPersonDetails(target,timer);return cpiBrowser.readValidatedCpf(target);},
       getJob:()=>cpiWorkflow.get(who,target),
       claim:()=>cpiWorkflow.claim(who,target),
       mark:(stage,updates)=>cpiWorkflow.mark(who,target,stage,updates),
@@ -128,7 +145,7 @@ async function cpiScanOne():Promise<{found:number;outcomes:import('./cpi/full-cy
       },
       uploadAndSave:async(pdf,result)=>{
         if(sessionAccount!==who)throw new Error('Conta Deskdata alterada durante o processamento CPI.');
-        return cpiBrowser.uploadAndSavePersonResponse(target,pdf,result);
+        return cpiBrowser.uploadAndSavePersonResponse(target,pdf,result,undefined,timer);
       },
       closeCompletedDetail:()=>cpiBrowser.closeCompletedDetail(target)
     });
@@ -206,18 +223,20 @@ async function pending(record:QueryRecord,immediate=false):Promise<QueryExecutio
   }
   return {state:'pending',recordId:record.id,queryCode:record.queryCode};
 }
-async function resolveRecorded(record:QueryRecord):Promise<QueryExecution>{
-  if(!record.queryCode)throw new Error('Código recuperável indisponível.');
-  if(monitor.isWatching(record.id))return {state:'pending',recordId:record.id,queryCode:record.queryCode};
-  const received=await client.checkByCode(record.queryCode);
+async function resolveRecorded(record:QueryRecord,timer:StepTimer=NULL_TIMER):Promise<QueryExecution>{
+  const code=record.queryCode;
+  if(!code)throw new Error('Código recuperável indisponível.');
+  if(monitor.isWatching(record.id))return {state:'pending',recordId:record.id,queryCode:code};
+  const received=await timer.step('deskdata_fetch',()=>client.checkByCode(code));
   if(received.state==='pending')return pending(record);
-  if(record.kind==='company' && record.cnpj){
-    assertRecoveredCnpj(received.payload,record.cnpj);
-    return ready({...await exportCompany(record.cnpj,received.payload,record.id,record.queryCode),reused:true});
+  const cnpj=record.cnpj;
+  if(record.kind==='company' && cnpj){
+    assertRecoveredCnpj(received.payload,cnpj);
+    return ready({...await timer.step('report_pdf',()=>exportCompany(cnpj,received.payload,record.id,code)),reused:true});
   }
   assertRecoveredCpf(received.payload,record.cpf);
-  const result:ReceivedPersonQuery={account:record.account,recordId:record.id,cpf:record.cpf,consultedAt:new Date().toISOString(),queryCode:record.queryCode,payload:received.payload};
-  return ready({...await processReceived(result),reused:true});
+  const result:ReceivedPersonQuery={account:record.account,recordId:record.id,cpf:record.cpf,consultedAt:new Date().toISOString(),queryCode:code,payload:received.payload};
+  return ready({...await timer.step('report_pdf',()=>processReceived(result)),reused:true});
 }
 async function completePending(target:PendingTarget,payload:unknown):Promise<void>{
   const work=(async()=>{
@@ -257,7 +276,10 @@ async function resumePending(recordId:string):Promise<QueryExecution>{
   }
   return pending(record,true);
 }
-async function queryAndSave(rawCpf:string):Promise<QueryExecution>{
+function queryAndSave(rawCpf:string):Promise<QueryExecution>{
+  return timedCycle('person',timer=>queryAndSaveTimed(rawCpf,timer),result=>result.state);
+}
+async function queryAndSaveTimed(rawCpf:string,timer:StepTimer):Promise<QueryExecution>{
   if(cpiAuto?.isActive())throw new Error('Pause o ciclo CPI FULL AUTO antes de consultar manualmente.');
   if(busy)throw new Error('Já existe uma operação em execução.');
   if(typeof rawCpf!=='string'||!isValidCpf(rawCpf))throw new Error('CPF inválido.');
@@ -277,20 +299,20 @@ async function queryAndSave(rawCpf:string):Promise<QueryExecution>{
       }
       if(!previous.queryCode){
         const cached=personReports.readFor(who,cpf,previous.id);
-        if(cached)return ready(await processReceived(cached));
+        if(cached)return ready(await timer.step('report_pdf',()=>processReceived(cached)));
         throw new Error('Existe uma consulta anterior deste CPF sem PDF disponível nem código recuperável. Nenhum novo POST foi enviado. Verifique o histórico antes de autorizar outra consulta.');
       }
-      return resolveRecorded(previous);
+      return resolveRecorded(previous,timer);
     }
     await assertPaidQueryApproved();
-    const credits=await client.credits();
+    const credits=await timer.step('deskdata_credits',()=>client.credits());
     if(credits<=0)throw new Error('Saldo de créditos indisponível ou zerado.');
     // Registro cifrado ANTES do POST. Se a conexão cair, não repetimos uma operação potencialmente cobrada.
     const record=await history.begin(who,cpf);
-    const outcome=await client.submitCpf(cpf,code=>history.setCode(record.id,code));
+    const outcome=await timer.step('deskdata_query',()=>client.submitCpf(cpf,code=>history.setCode(record.id,code)));
     if(outcome.state==='pending')return pending({...record,queryCode:outcome.queryCode});
     const received:ReceivedPersonQuery={account:who,recordId:record.id,cpf,consultedAt:new Date().toISOString(),queryCode:outcome.queryCode,payload:outcome.payload};
-    return ready(await processReceived(received));
+    return ready(await timer.step('report_pdf',()=>processReceived(received)));
   }finally{busy=false;}
 }
 async function regenerateHistory(recordId:string):Promise<QueryExecution>{
@@ -338,7 +360,10 @@ function reusedPis(result:PisQueryExecution):PisQueryExecution {
     ? {state:'ready',pdf:{...result.pdf,reused:true}}
     : {...result,reused:true};
 }
-async function queryPisAndSave(rawCpf:string):Promise<PisQueryExecution>{
+function queryPisAndSave(rawCpf:string):Promise<PisQueryExecution>{
+  return timedCycle('pis',timer=>queryPisAndSaveTimed(rawCpf,timer),result=>result.state);
+}
+async function queryPisAndSaveTimed(rawCpf:string,timer:StepTimer):Promise<PisQueryExecution>{
   if(cpiAuto?.isActive())throw new Error('Pause o ciclo CPI FULL AUTO antes de consultar manualmente.');
   if(busy)throw new Error('Já existe uma operação em execução.');
   if(typeof rawCpf!=='string'||!isValidCpf(rawCpf))throw new Error('CPF inválido.');
@@ -354,26 +379,29 @@ async function queryPisAndSave(rawCpf:string):Promise<PisQueryExecution>{
       }
       // Resultado terminal: não repetir POST nem GET em cada clique. GET manual continua disponível.
       if(previous.status==='pis_unavailable')return {state:'no_pis',recordId:previous.id,queryCode:previous.queryCode,reused:true};
-      if(lastPisResponse?.cpf===cpf)return reusedPis(await exportPis(cpf,lastPisResponse.payload,previous.id,lastPisResponse.queryCode));
-      if(!previous.queryCode)throw new Error('Consulta PIS anterior sem PDF nem código recuperável. Não repetiremos o POST para evitar nova cobrança.');
-      const recovered=await client.fetchByCode(previous.queryCode);
+      const cachedPis=lastPisResponse;
+      if(cachedPis?.cpf===cpf)return reusedPis(await timer.step('report_pdf',()=>exportPis(cpf,cachedPis.payload,previous.id,cachedPis.queryCode)));
+      const previousCode=previous.queryCode;
+      if(!previousCode)throw new Error('Consulta PIS anterior sem PDF nem código recuperável. Não repetiremos o POST para evitar nova cobrança.');
+      const recovered=await timer.step('deskdata_fetch',()=>client.fetchByCode(previousCode));
       assertRecoveredCpf(recovered.payload,cpf);
-      return reusedPis(await exportPis(cpf,recovered.payload,previous.id,recovered.queryCode));
+      return reusedPis(await timer.step('report_pdf',()=>exportPis(cpf,recovered.payload,previous.id,recovered.queryCode)));
     }
     // Consulta completa anterior já contém basic: utilizar GET pelo código, sem criar novo POST.
     const person=await history.findLatest(who,cpf,'person');
-    if(person?.queryCode){
-      const recovered=await client.fetchByCode(person.queryCode);
+    const personCode=person?.queryCode;
+    if(personCode){
+      const recovered=await timer.step('deskdata_fetch',()=>client.fetchByCode(personCode));
       assertRecoveredCpf(recovered.payload,cpf);
       const record=await history.begin(who,cpf,'pis');
-      await history.setCode(record.id,person.queryCode);
-      return reusedPis(await exportPis(cpf,recovered.payload,record.id,person.queryCode));
+      await history.setCode(record.id,personCode);
+      return reusedPis(await timer.step('report_pdf',()=>exportPis(cpf,recovered.payload,record.id,personCode)));
     }
     await assertPaidQueryApproved();
-    if(await client.credits()<=0)throw new Error('Saldo de créditos insuficiente.');
+    if(await timer.step('deskdata_credits',()=>client.credits())<=0)throw new Error('Saldo de créditos insuficiente.');
     const record=await history.begin(who,cpf,'pis');
-    const result=await client.queryBasicCpf(cpf,code=>history.setCode(record.id,code));
-    return exportPis(cpf,result.payload,record.id,result.queryCode);
+    const result=await timer.step('deskdata_query',()=>client.queryBasicCpf(cpf,code=>history.setCode(record.id,code)));
+    return timer.step('report_pdf',()=>exportPis(cpf,result.payload,record.id,result.queryCode));
   }finally{busy=false;}
 }
 async function regeneratePis(recordId:string):Promise<PisQueryExecution>{
@@ -398,7 +426,10 @@ async function exportCompany(cnpj:string,payload:unknown,recordId:string,queryCo
   await history.addPdf(recordId,saved.path);
   return {...saved,recordId};
 }
-async function queryCompanyAndSave(rawCnpj:string):Promise<QueryExecution>{
+function queryCompanyAndSave(rawCnpj:string):Promise<QueryExecution>{
+  return timedCycle('company',timer=>queryCompanyAndSaveTimed(rawCnpj,timer),result=>result.state);
+}
+async function queryCompanyAndSaveTimed(rawCnpj:string,timer:StepTimer):Promise<QueryExecution>{
   if(cpiAuto?.isActive())throw new Error('Pause o ciclo CPI FULL AUTO antes de consultar manualmente.');
   if(busy)throw new Error('Já existe uma operação em execução.');
   if(typeof rawCnpj!=='string'||!isValidCnpj(rawCnpj))throw new Error('CNPJ inválido.');
@@ -412,16 +443,17 @@ async function queryCompanyAndSave(rawCnpj:string):Promise<QueryExecution>{
       for(const path of [...previous.pdfPaths].reverse()){
         if(await validateStoredPdf(path))return ready({path,recordId:previous.id,queryCode:previous.queryCode,savedAt:previous.updatedAt,reused:true});
       }
-      if(lastCompanyResponse?.cnpj===cnpj)return ready({...await exportCompany(cnpj,lastCompanyResponse.payload,previous.id,lastCompanyResponse.queryCode),reused:true});
+      const cachedCompany=lastCompanyResponse;
+      if(cachedCompany?.cnpj===cnpj)return ready({...await timer.step('report_pdf',()=>exportCompany(cnpj,cachedCompany.payload,previous.id,cachedCompany.queryCode)),reused:true});
       if(!previous.queryCode)throw new Error('Consulta anterior sem PDF nem código recuperável. Não será enviado outro POST automaticamente.');
-      return resolveRecorded(previous);
+      return resolveRecorded(previous,timer);
     }
     await assertPaidQueryApproved();
-    if(await client.credits()<=0)throw new Error('Saldo de créditos indisponível.');
+    if(await timer.step('deskdata_credits',()=>client.credits())<=0)throw new Error('Saldo de créditos indisponível.');
     const record=await history.beginCompany(who,cnpj); // persistir antes do POST
-    const result=await client.submitCompany(cnpj,code=>history.setCode(record.id,code));
+    const result=await timer.step('deskdata_query',()=>client.submitCompany(cnpj,code=>history.setCode(record.id,code)));
     if(result.state==='pending')return pending({...record,queryCode:result.queryCode});
-    return ready(await exportCompany(cnpj,result.payload,record.id,result.queryCode));
+    return ready(await timer.step('report_pdf',()=>exportCompany(cnpj,result.payload,record.id,result.queryCode)));
   }finally{busy=false;}
 }
 async function regenerateCompany(recordId:string):Promise<QueryExecution>{

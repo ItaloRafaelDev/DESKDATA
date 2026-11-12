@@ -8,6 +8,7 @@ import { assessCpiPerson } from './person-rules.ts';
 import type { CpiPendingRowId } from './pending-rows.ts';
 import { findCpiPersonPdf } from './person-pdf.ts';
 import type { CpiWorkItem, CpiWorkStage } from './workflow-store.ts';
+import { NULL_TIMER, type StepTimer } from '../step-timing.ts';
 
 export type CpiCycleOutcome = {state:'completed'|'verification_required'|'pending'|'review_required'; pesquisaId:string;solicitacaoId:string;message:string;warning?:'auxiliary_404';reviewReason?:JudicialIssueCode};
 export interface FullCycleServices {
@@ -29,6 +30,8 @@ export interface FullCycleServices {
   savePdf(cpf:string,recordId:string,queryCode:string|undefined,data:NormalizedData):Promise<void>;
   uploadAndSave(pdfPath:string,classification:'restrictions'|'information'):Promise<'confirmed'|'confirmed_auxiliary_404'|'unverified'|'not_submitted'>;
   closeCompletedDetail():Promise<void>;
+  /** Medição de duração por etapa; recebe apenas nomes fixos de etapa. */
+  timer?:Pick<StepTimer,'step'>;
 }
 function outcome(args:FullCycleServices,state:CpiCycleOutcome['state'],message:string,warning?:CpiCycleOutcome['warning'],reviewReason?:JudicialIssueCode):CpiCycleOutcome {
   return {...args.ids,state,message,...(warning?{warning}:{}),...(reviewReason?{reviewReason}:{})};
@@ -39,6 +42,7 @@ function outcome(args:FullCycleServices,state:CpiCycleOutcome['state'],message:s
  */
 export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycleOutcome>{
   if(!s.outputFolder)throw new Error('Configure a pasta de PDFs antes de iniciar a automação.');
+  const timer=s.timer??NULL_TIMER;
   let job=await s.getJob();
   if(job&&['completed','submit_started','verification_required','review_required'].includes(job.stage)){
     return outcome(s,job.stage==='completed'?'completed':'review_required',
@@ -57,13 +61,13 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
       return outcome(s,'review_required','Há tentativa anterior sem histórico recuperável. Não repetir POST.');
     }
     if(!await s.paidApproved())return outcome(s,'review_required','Autorização Deskdata necessária para nova consulta.');
-    const credits=await s.getCredits();
     // O saldo e a aprovação são conferidos antes de criar o histórico e enviar POST.
     // O próprio status query_started impede repetir o POST se a rede falhar.
-    await s.verifyPaidBalance(credits);
+    await timer.step('deskdata_credits',async()=>s.verifyPaidBalance(await s.getCredits()));
     record=await s.beginHistory(cpf);
     await s.mark('query_started',{historyRecordId:record.id});
-    const started=await s.submitCpf(cpf,code=>s.setQueryCode(record!.id,code));
+    const created=record;
+    const started=await timer.step('deskdata_query',()=>s.submitCpf(cpf,code=>s.setQueryCode(created.id,code)));
     queryCode=started.queryCode;
     if(started.state==='pending'){
       await s.mark('query_pending',{historyRecordId:record.id});
@@ -83,7 +87,8 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
       return outcome(s,'review_required','Consulta existente sem código GET; não é possível confirmar competência dos processos.');
     }
     await s.mark('query_pending',{historyRecordId:record.id});
-    const received=await s.fetchByCode(queryCode);
+    const code=queryCode;
+    const received=await timer.step('deskdata_fetch',()=>s.fetchByCode(code));
     payload=received.payload;
   }
   assertRecoveredCpf(payload,cpf);
@@ -104,7 +109,8 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
   // Um PDF ready pode ter sido emitido de outra versão da resposta. A assinatura
   // e o vínculo CPF/registro não comprovam quais processos ele contém.
   const previousPdfPaths=new Set(record.pdfPaths);
-  await s.savePdf(cpf,record.id,queryCode,data);
+  const recordId=record.id;
+  await timer.step('report_pdf',()=>s.savePdf(cpf,recordId,queryCode,data));
   // Recarregar o histórico após gerar um PDF: não confiar em referência desatualizada.
   const updated=await s.findLatest(cpf);
   if(!updated||updated.id!==record.id)throw new Error('Histórico mudou durante geração do PDF.');
@@ -129,7 +135,7 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
     // Persistir uma pendência antes de fechar; nunca liberar reenvio ao retomar.
     await s.mark('review_required');
     try {
-      await s.closeCompletedDetail();
+      await timer.step('cpi_close_detail',()=>s.closeCompletedDetail());
       await s.mark('completed');
     } catch {
       // Falha no fechamento, atualização da listagem ou persistência da conclusão:

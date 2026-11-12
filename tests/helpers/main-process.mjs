@@ -9,7 +9,7 @@ import { QueryHistoryStore } from '../../src/main/query-history.ts';
 /** Executa os handlers reais sem iniciar Electron, navegador ou conexão externa. */
 export async function withMainProcess(submitCpf,run,options={}){
   const root=await mkdtemp(join(tmpdir(),'deskdata-main-integrity-'));
-  const stores=[],handlers=new Map(),listeners=new Map(),events=[];
+  const stores=[],handlers=new Map(),listeners=new Map(),events=[],diagnostics=[];
   const sourceUrl=new URL('../../src/main/index.ts',import.meta.url);
   const localRequire=createRequire(sourceUrl);
   let initialize,window,renderCount=0,quitting=false,failedClose=false;
@@ -77,7 +77,7 @@ export async function withMainProcess(submitCpf,run,options={}){
     }}}:{}),
     './pdf.ts':{saveReportPdf:async(_folder,report)=>({path:join(root,`RELATORIO_${report.cpf}_${++renderCount}.pdf`),
       queryCode:report.queryCode,savedAt:'2026-11-11T00:00:00Z'})},
-    './diagnostics.ts':{DiagnosticLogger:class {async write(){}}}
+    './diagnostics.ts':{DiagnosticLogger:class {async write(event,fields={}){diagnostics.push({event,...fields});}}}
   };
   try{
     const source=(await readFile(sourceUrl,'utf8')).replaceAll('import.meta.url',JSON.stringify(sourceUrl.href));
@@ -92,7 +92,7 @@ export async function withMainProcess(submitCpf,run,options={}){
     };
     await invoke('auth:login','ipc-tests@example.invalid','fictitious-password',false);
     await invoke('settings:approve',true);
-    await run({invoke,root,renderCount:()=>renderCount,requestQuit:quit,events,
+    await run({invoke,root,renderCount:()=>renderCount,requestQuit:quit,events,diagnostics,
       allWindowsClosed:()=>emit('window-all-closed'),hasQuit:()=>quitting,
       reopenHistory:async()=>{
         const store=new QueryHistoryStore(root,{isAvailable:async()=>true,encrypt:async s=>Buffer.from(s),
