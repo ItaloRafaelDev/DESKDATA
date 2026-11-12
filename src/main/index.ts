@@ -145,13 +145,18 @@ function bind<T extends unknown[]>(channel:string,operation:(...args:T)=>Promise
     guard(event);
     const began=performance.now();
     try {
-      if(channel==='cpi:close'||channel==='auth:logout'){
+      const stoppingCpi=channel==='cpi:close'||channel==='auth:logout';
+      if(stoppingCpi){
         operations.assertAccepting();
         if(channel==='auth:logout'&&(maintenanceActive||sessionTransitionActive||(busy&&!cpiAuto.isActive())))
           throw new Error('Conclua a operação atual antes de encerrar a sessão.');
-        await Promise.all([cpiAuto.pause(),cpiMonitor.stopAndWait()]);
+        if(operations.isExclusive()&&!cpiAuto.isActive()&&!cpiMonitor.isActive())
+          throw new Error('Outra operação está em andamento. Conclua a operação atual.');
       }
-      const result=await operations.run(()=>operation(...(args as T)),exclusiveChannels.has(channel));
+      const work=()=>operation(...(args as T));
+      const result=stoppingCpi
+        ? await operations.runExclusiveAfter(()=>Promise.all([cpiAuto.pause(),cpiMonitor.stopAndWait()]),work)
+        : await operations.run(work,exclusiveChannels.has(channel));
       void diagnostics?.write('ipc_success',{channel,durationMs:performance.now()-began}).catch(()=>{});
       return result;
     } catch(error){

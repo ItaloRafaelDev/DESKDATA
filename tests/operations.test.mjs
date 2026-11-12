@@ -39,3 +39,20 @@ test('drenagem aguarda trabalhos compartilhados, falhas e parada externa',async(
   stop.resolve();assert.equal(await operations.waitForIdle([stop.promise],5),true);
   await assert.rejects(settleWithin(Promise.reject(new Error('recurso indisponível')),5),/recurso/);
 });
+
+test('reserva exclusiva durante preparação bloqueia nova varredura e espera a anterior terminar',async()=>{
+  const operations=new ApplicationOperations(),active=deferred(),prepare=deferred();
+  const order=[];
+  const first=operations.run(async()=>{await active.promise;order.push('varredura');},true);
+  const stopping=operations.runExclusiveAfter(async()=>{await prepare.promise;},async()=>{order.push('fechamento');});
+  assert.equal(operations.isExclusive(),true);
+  await assert.rejects(operations.run(async()=>{order.push('nova varredura');},true),/operação/);
+  await assert.rejects(operations.runExclusiveAfter(async()=>{},async()=>{}),/operação/);
+  prepare.resolve();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(order,[]);
+  active.resolve();
+  await first;await stopping;
+  assert.deepEqual(order,['varredura','fechamento']);
+  assert.equal(operations.isExclusive(),false);
+});
