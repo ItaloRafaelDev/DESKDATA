@@ -8,7 +8,7 @@
 
 **Tech Stack:** Electron 45, React 19, TypeScript, Node test runner, CSS print.
 
-**Spec:** User chat, reference `DESKDATA_Modelo_01_Executivo_Minimalista.pdf`, actual generated `DESKDATA_14996213884_2026-10-30.pdf`, and official Deskdata processes dataset documentation.
+**Spec:** User chat, reference `DESKDATA_Modelo_01_Executivo_Minimalista.pdf`, actual generated `DESKDATA_<CPF>_2026-10-30.pdf`, and official Deskdata processes dataset documentation.
 
 ## Global Constraints
 
