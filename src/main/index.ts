@@ -145,7 +145,18 @@ function bind<T extends unknown[]>(channel:string,operation:(...args:T)=>Promise
     guard(event);
     const began=performance.now();
     try {
-      const result=await operations.run(()=>operation(...(args as T)),exclusiveChannels.has(channel));
+      const stoppingCpi=channel==='cpi:close'||channel==='auth:logout';
+      if(stoppingCpi){
+        operations.assertAccepting();
+        if(channel==='auth:logout'&&(maintenanceActive||sessionTransitionActive||(busy&&!cpiAuto.isActive())))
+          throw new Error('Conclua a operação atual antes de encerrar a sessão.');
+        if(operations.isExclusive()&&!cpiAuto.isActive()&&!cpiMonitor.isActive())
+          throw new Error('Outra operação está em andamento. Conclua a operação atual.');
+      }
+      const work=()=>operation(...(args as T));
+      const result=stoppingCpi
+        ? await operations.runExclusiveAfter(()=>Promise.all([cpiAuto.pause(),cpiMonitor.stopAndWait()]),work)
+        : await operations.run(work,exclusiveChannels.has(channel));
       void diagnostics?.write('ipc_success',{channel,durationMs:performance.now()-began}).catch(()=>{});
       return result;
     } catch(error){
@@ -556,7 +567,7 @@ if(instanceLock)app.whenReady().then(()=>{
     const who=account();
     const items=await cpiWorkflow.list(who);
     const completed=items.filter(item=>item.stage==='completed');
-    const reviewCount=items.filter(item=>['verification_required','review_required','submit_started'].includes(item.stage)).length;
+    const reviewCount=items.filter(item=>['verification_required','review_required','submit_started','query_started'].includes(item.stage)).length;
     const recent=await Promise.all(completed.slice(0,100).map(async item=>{
       let pdfAvailable=false;
       if(item.historyRecordId){

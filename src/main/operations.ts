@@ -2,28 +2,43 @@
 export class ApplicationOperations {
   private readonly active=new Set<Promise<void>>();
   private exclusive=false;
+  private reservation=false;
+  private exclusiveCompletion:Promise<void>|null=null;
   private closing=false;
 
   assertAccepting():void {
     if(this.closing)throw new Error('Aplicativo em encerramento; novas operações estão bloqueadas.');
   }
-  isExclusive():boolean {return this.exclusive;}
+  isExclusive():boolean {return this.exclusive||this.reservation;}
   stopAccepting():void {this.closing=true;}
   resumeAccepting():void {this.closing=false;}
 
   async run<T>(work:()=>Promise<T>,exclusive=false):Promise<T>{
     this.assertAccepting();
-    if(exclusive && this.exclusive)throw new Error('Outra operação está em andamento. Conclua a operação atual.');
+    if(exclusive && this.isExclusive())throw new Error('Outra operação está em andamento. Conclua a operação atual.');
     if(exclusive)this.exclusive=true;
     let finish!:()=>void;
     const completion=new Promise<void>(resolve=>{finish=resolve;});
+    if(exclusive)this.exclusiveCompletion=completion;
     this.active.add(completion);
     try{return await work();}
     finally{
-      if(exclusive)this.exclusive=false;
+      if(exclusive){this.exclusive=false;this.exclusiveCompletion=null;}
       this.active.delete(completion);
       finish();
     }
+  }
+  /** Reserva a próxima operação exclusiva antes de esperar a operação CPI em curso terminar. */
+  async runExclusiveAfter<T>(prepare:()=>Promise<unknown>,work:()=>Promise<T>):Promise<T>{
+    this.assertAccepting();
+    if(this.reservation)throw new Error('Outra operação está em andamento. Conclua a operação atual.');
+    this.reservation=true;
+    try{
+      await prepare();
+      await this.exclusiveCompletion;
+      this.reservation=false;
+      return await this.run(work,true);
+    }finally{this.reservation=false;}
   }
   async waitForIdle(additional:Promise<unknown>[]=[],timeoutMs=60_000):Promise<boolean>{
     return settleWithin(Promise.allSettled([...this.active,...additional]),timeoutMs);
