@@ -59,6 +59,19 @@ export interface CpiHistoryOverview {
   reviewCount: number;
   items: CpiHistoryItem[];
 }
+export type CpiPendingWorkflowStage='review_required'|'verification_required'|'submit_started';
+export type CpiVerificationReason='confirmed'|'remote_unverified'|'remote_unavailable'|'local_incomplete';
+export interface CpiPendingWorkflowItem extends CpiPendingRowId {
+  stage:CpiPendingWorkflowStage;
+  reviewReason?:import('./judicial.ts').JudicialIssueCode;
+  lastVerificationReason?:CpiVerificationReason;
+  createdAt?:string;
+  submittedAt?:string;
+  updatedAt:string;
+  lastCheckedAt?:string;
+}
+export interface CpiPendingWorkflowPage {total:number;page:number;pageSize:number;items:CpiPendingWorkflowItem[]}
+export interface CpiWorkflowVerificationResult {stage:CpiPendingWorkflowStage|'completed';reason:CpiVerificationReason;checkedAt:string}
 export interface CpiAutoSnapshot {
   phase:'stopped'|'running'|'waiting'|'paused'|'error';
   checks:number;processed:number;lastMessage:string;nextCheckAt:string|null;intervalSeconds:number;
@@ -74,6 +87,8 @@ export interface DesktopApi {
   cpiAutoPause():Promise<CpiAutoSnapshot>;
   subscribeCpiAuto(callback:(value:CpiAutoSnapshot)=>void):()=>void;
   cpiHistory():Promise<CpiHistoryOverview>;
+  cpiPendingWorkflows(page:number,pageSize:number):Promise<CpiPendingWorkflowPage>;
+  cpiVerifyWorkflow(ids:CpiPendingRowId):Promise<CpiWorkflowVerificationResult>;
   cpiOpenHistoryPdf(ids:CpiPendingRowId):Promise<void>;
   cpiOpen(): Promise<CpiBrowserStatus>;
   cpiStatus(): Promise<CpiBrowserStatus>;

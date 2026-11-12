@@ -4,6 +4,7 @@ import { inspectPendingPerson29Rows, validateCpiRowId, type CpiPendingRowId, typ
 import { validateCpiPersonDetails, resolveCpiDetailHeadings, matchesCpiDetailHeadings, readCpiDetailDom, type CpiDetailDomSnapshot, type CpiRawPersonDetails, type CpiPendingPersonDetail } from './pending-details.ts';
 import { classifyCpiVisibleServerError, hasConfirmedSavedCpiResponse, type CpiSavedResponseEvidence } from './response-confirmation.ts';
 import { refreshPendingAfterConfirmedSave } from './pending-refresh.ts';
+import { cpfDigits, isValidCpf } from '../../shared/cpf.ts';
 
 export const CPI_LOGIN_URL = 'https://adm.cpicentral.com.br/acesso/checkUser.aspx';
 const CPI_HOST = 'adm.cpicentral.com.br';
@@ -264,6 +265,24 @@ export class CpiBrowser {
       hasResponseTimestamp:validDate,
       hasPdfDocument:norm(dom.pdfDocument)==='DOCUMENTO PDF',
       editableUploadPresent:dom.editableUploadPresent,serverErrorVisible:errors.blocking||dom.businessErrorVisible,auxiliary404Observed:errors.auxiliary404};
+  }
+
+  /** Reconciliação somente leitura do detalhe aberto manualmente, sem navegar, anexar ou submeter. */
+  async inspectPersistedPersonResponse(ids:CpiPendingRowId,classification:'restrictions'|'information',expectedCpf:string):Promise<'confirmed'|'unverified'|'unavailable'>{
+    if(!validateCpiRowId(ids)||!isValidCpf(expectedCpf))throw new Error('Identidade CPI inválida para verificação.');
+    if(this.status().state!=='open')return 'unavailable';
+    const detail=await this.readDetailFrame(ids);
+    if(!detail)return 'unavailable';
+    if(detail.dom.cpfText&&cpfDigits(detail.dom.cpfText)!==expectedCpf)return 'unverified';
+    // O DOM em memória pode ser apenas o resultado de um POST cuja persistência falhou.
+    // Reabrir a URL exata por GET e conferir novamente o mesmo frame e os mesmos IDs.
+    try{await detail.frame.goto(detail.frame.url(),{waitUntil:'domcontentloaded',timeout:15000});}
+    catch{return 'unavailable';}
+    const refreshed=await this.readDetailFrame(ids);
+    if(!refreshed||refreshed.frame!==detail.frame)return 'unverified';
+    if(refreshed.dom.cpfText&&cpfDigits(refreshed.dom.cpfText)!==expectedCpf)return 'unverified';
+    const evidence=await this.savedResponseEvidence(detail.frame,ids,classification);
+    return evidence&&hasConfirmedSavedCpiResponse(evidence)?'confirmed':'unverified';
   }
 
   /** Fecha somente o modal da pesquisa que já foi confirmada; nunca fecha em envio incerto. */

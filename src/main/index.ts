@@ -9,9 +9,11 @@ import { prepareCpiPersonPdf } from './cpi/person-recovery.ts';
 import { assertCpiPaidBalance } from './cpi/paid-balance.ts';
 import { validateCpiRowId } from './cpi/pending-rows.ts';
 import { CpiWorkflowStore } from './cpi/workflow-store.ts';
+import { reconcileCpiWorkflow } from './cpi/workflow-reconciliation.ts';
+import { findCpiPersonPdf } from './cpi/person-pdf.ts';
 import { CpiFullAutoRunner } from './cpi/full-auto-runner.ts';
 import { executeCpiPersonCycle } from './cpi/full-cycle.ts';
-import type { CpiPendingRowId } from '../shared/types.ts';
+import type { CpiPendingRowId, CpiPendingWorkflowStage } from '../shared/types.ts';
 import { DiagnosticLogger } from './diagnostics.ts';
 import { extname } from 'node:path';
 import { join, dirname } from 'node:path';
@@ -44,7 +46,7 @@ const exclusiveChannels=new Set([
   'history:regenerate','pis:regenerate','company:regenerate','report:reprocess','report:save-again',
   'maintenance:clean','backup:create','auth:login','auth:logout','settings:choose-folder',
   'cpi:open','cpi:inspect','cpi:filter-person-29','cpi:rows:inspect','cpi:details:inspect',
-  'cpi:person:history','cpi:person:prepare'
+  'cpi:person:history','cpi:person:prepare','cpi:workflow:verify','cpi:close'
 ]);
 const cpiBrowser=new CpiBrowser();
 const cpiMonitor=new CpiPendingMonitor(
@@ -569,6 +571,39 @@ if(instanceLock)app.whenReady().then(()=>{
         classification:item.classification??'information',answeredAt:item.updatedAt,pdfAvailable};
     }));
     return {completedCount:completed.length,reviewCount,items:recent};
+  });
+  bind<[number,number]>('cpi:workflow:pending',async(page,pageSize)=>{
+    const who=account();
+    const result=await cpiWorkflow.listPending(who,page,pageSize);
+    return {...result,items:result.items.map(item=>{
+      const last=item.verificationEvents?.at(-1);
+      return {pesquisaId:item.pesquisaId,solicitacaoId:item.solicitacaoId,
+        stage:item.stage as CpiPendingWorkflowStage,reviewReason:item.reviewReason,
+        lastVerificationReason:last?.reason,createdAt:item.createdAt,submittedAt:item.submittedAt,
+        updatedAt:item.updatedAt,lastCheckedAt:last?.at};
+    })};
+  });
+  bind<[CpiPendingRowId]>('cpi:workflow:verify',async ids=>{
+    const who=account();
+    if(!validateCpiRowId(ids))throw new Error('Identificadores CPI inválidos.');
+    if(cpiAuto.isActive()||cpiMonitor.isActive()||busy||maintenanceActive)
+      throw new Error('Pause o agente e o monitor CPI antes de verificar uma pesquisa.');
+    const result=await reconcileCpiWorkflow({store:cpiWorkflow,account:who,ids,
+      checkLocal:async job=>{
+        if(!job.historyRecordId)return {ready:false};
+        const record=await history.findById(who,job.historyRecordId);
+        if(!record||record.account!==who||(record.kind!==undefined&&record.kind!=='person')||record.status!=='ready'||!isValidCpf(record.cpf))return {ready:false};
+        const folder=(await getSettings()).outputFolder;
+        if(!folder)return {ready:false};
+        try{await findCpiPersonPdf(record,record.cpf,folder);return {ready:true,cpf:record.cpf};}
+        catch{return {ready:false};}
+      },
+      inspectRemote:(target,classification,cpf)=>cpiBrowser.inspectPersistedPersonResponse(target,classification,cpf)
+    });
+    if(sessionAccount!==who)throw new Error('Conta alterada durante a verificação CPI.');
+    const last=result.verificationEvents?.at(-1);
+    if(!last)throw new Error('Auditoria da verificação CPI indisponível.');
+    return {stage:result.stage,reason:last.reason,checkedAt:last.at};
   });
   bind<[CpiPendingRowId]>('cpi:history:open-pdf',async ids=>{
     const who=account();

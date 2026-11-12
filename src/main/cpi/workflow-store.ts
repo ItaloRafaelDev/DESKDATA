@@ -7,23 +7,33 @@ import { JUDICIAL_ISSUE_CODES, type JudicialIssueCode } from '../../shared/judic
 
 /** Dados de controle cifrados. Nenhum CPF, documento, PDF ou token é persistido aqui. */
 export type CpiWorkStage = 'claimed'|'query_started'|'query_pending'|'pdf_ready'|'submit_started'|'completed'|'verification_required'|'review_required';
+export type CpiVerificationReason = 'confirmed'|'remote_unverified'|'remote_unavailable'|'local_incomplete';
+export interface CpiVerificationEvent { at:string; from:CpiWorkStage; to:CpiWorkStage; reason:CpiVerificationReason }
 export interface CpiWorkItem extends CpiPendingRowId {
   account: string;
   stage: CpiWorkStage;
   historyRecordId?: string;
   classification?: 'restrictions'|'information';
   reviewReason?:JudicialIssueCode;
+  createdAt?:string;
+  submittedAt?:string;
+  verificationEvents?:CpiVerificationEvent[];
   updatedAt: string;
 }
 type Stored = { version:1; items:CpiWorkItem[] };
 const MAX_WORK_ITEMS=10000;
 const CAPACITY_ERROR='Fila CPI atingiu o limite operacional de 10.000 registros; processamento bloqueado sem alterar o histórico.';
 const stages = new Set<CpiWorkStage>(['claimed','query_started','query_pending','pdf_ready','submit_started','completed','verification_required','review_required']);
+const verificationReasons=new Set<CpiVerificationReason>(['confirmed','remote_unverified','remote_unavailable','local_incomplete']);
+const validDate=(value:unknown):value is string=>typeof value==='string'&&!Number.isNaN(Date.parse(value));
 function valid(row:unknown):row is CpiWorkItem {
   if (!row || typeof row!=='object') return false;
   const r=row as Partial<CpiWorkItem>;
   return !!validateCpiRowId(r) && typeof r.account==='string' && !!r.account.trim() &&
-    stages.has(r.stage as CpiWorkStage) && typeof r.updatedAt==='string' && !Number.isNaN(Date.parse(r.updatedAt)) &&
+    stages.has(r.stage as CpiWorkStage) && validDate(r.updatedAt) &&
+    (r.createdAt===undefined||validDate(r.createdAt)) && (r.submittedAt===undefined||validDate(r.submittedAt)) &&
+    (r.verificationEvents===undefined||(Array.isArray(r.verificationEvents)&&r.verificationEvents.every(event=>
+      event&&validDate(event.at)&&stages.has(event.from)&&stages.has(event.to)&&verificationReasons.has(event.reason)))) &&
     (r.historyRecordId===undefined || (typeof r.historyRecordId==='string' && /^[a-f0-9-]{30,50}$/i.test(r.historyRecordId))) &&
     (r.classification===undefined || r.classification==='restrictions' || r.classification==='information') &&
     (r.reviewReason===undefined || JUDICIAL_ISSUE_CODES.includes(r.reviewReason));
@@ -86,6 +96,16 @@ export class CpiWorkflowStore {
       .sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt))
       .map(row=>({...row}));
   }
+  /** Página zero-based das pesquisas que exigem conferência; a conta é filtrada antes da paginação. */
+  async listPending(account:string,page:number,pageSize:number):Promise<{total:number;page:number;pageSize:number;items:CpiWorkItem[]}>{
+    if(typeof account!=='string'||!account.trim())throw new Error('Conta CPI inválida.');
+    if(!Number.isSafeInteger(page)||page<0||!Number.isSafeInteger(pageSize)||pageSize<1||pageSize>100)throw new Error('Paginação CPI inválida.');
+    await this.queue;
+    const pending=(await this.read()).items.filter(row=>row.account===account.trim().toLowerCase()&&
+      ['review_required','verification_required','submit_started'].includes(row.stage))
+      .sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
+    return {total:pending.length,page,pageSize,items:pending.slice(page*pageSize,(page+1)*pageSize).map(row=>({...row}))};
+  }
   async get(account:string,ids:CpiPendingRowId):Promise<CpiWorkItem|null>{
     if(!validateCpiRowId(ids)||!account.trim())throw new Error('Identificação CPI inválida.');
     await this.queue;
@@ -97,7 +117,8 @@ export class CpiWorkflowStore {
       const db=await this.read();
       const previous=db.items.find(row=>key(row.account,row)===key(account,ids));
       if(previous)return previous;
-      const entry:CpiWorkItem={...ids,account:account.trim().toLowerCase(),stage:'claimed',updatedAt:new Date().toISOString()};
+      const now=new Date().toISOString();
+      const entry:CpiWorkItem={...ids,account:account.trim().toLowerCase(),stage:'claimed',createdAt:now,updatedAt:now};
       db.items.push(entry);await this.write(db);return entry;
     });
   }
@@ -112,9 +133,29 @@ export class CpiWorkflowStore {
         (before.stage==='submit_started' && !['submit_started','completed','verification_required','review_required'].includes(stage))){
         throw new Error('Envio CPI já iniciado ou encerrado; não será repetido automaticamente.');
       }
-      const after:CpiWorkItem={...before,...updates,stage,updatedAt:new Date().toISOString()};
+      const now=new Date().toISOString();
+      const after:CpiWorkItem={...before,...updates,stage,updatedAt:now,
+        ...(stage==='submit_started'&&!before.submittedAt?{submittedAt:now}:{})};
       if(!valid(after))throw new Error('Tentativa de persistir estado CPI inválido.');
       db.items[index]=after;await this.write(db);return after;
+    });
+  }
+  /** A única transição de reconciliação é calculada após prova remota; o renderer não escolhe o estado. */
+  async recordVerification(account:string,ids:CpiPendingRowId,reason:CpiVerificationReason):Promise<CpiWorkItem>{
+    if(!validateCpiRowId(ids)||typeof account!=='string'||!account.trim()||!verificationReasons.has(reason))throw new Error('Verificação CPI inválida.');
+    return this.locked(async()=>{
+      const db=await this.read();
+      const index=db.items.findIndex(row=>key(row.account,row)===key(account,ids));
+      if(index<0||!['review_required','verification_required','submit_started'].includes(db.items[index].stage))throw new Error('Pesquisa CPI não está pendente de verificação.');
+      const before=db.items[index];
+      if(reason==='confirmed'&&(!before.historyRecordId||!before.classification))throw new Error('Vínculo local CPI incompleto; conclusão bloqueada.');
+      const now=new Date().toISOString();
+      const stage=reason==='confirmed'?'completed':before.stage==='submit_started'?'verification_required':before.stage;
+      const event:CpiVerificationEvent={at:now,from:before.stage,to:stage,reason};
+      const after:CpiWorkItem={...before,stage,updatedAt:now,verificationEvents:[...(before.verificationEvents??[]),event]};
+      db.items[index]=after;
+      await this.write(db);
+      return after;
     });
   }
 }

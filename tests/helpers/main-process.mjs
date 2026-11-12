@@ -65,6 +65,7 @@ export async function withMainProcess(submitCpf,run,options={}){
     './cpi/cpi-browser.ts':{CpiBrowser:class {
       async close(){} status(){return {state:options.cpiOpen?'open':'closed'};}
       async filterPendingPerson29(){return options.filter?options.filter():{state:'empty',total:0,typeId:'29'};}
+      async inspectPersistedPersonResponse(...args){return options.inspectPersisted?options.inspectPersisted(...args):'unavailable';}
     }},
     './pending-queries.ts':{PendingQueryMonitor:class {
       tasks=new Set();stopAll(){this.tasks.clear();}isWatching(id){return this.tasks.has(id);}watch(target){events.push('query_watch');this.tasks.add(target.id);}
@@ -91,7 +92,7 @@ export async function withMainProcess(submitCpf,run,options={}){
     };
     await invoke('auth:login','ipc-tests@example.invalid','fictitious-password',false);
     await invoke('settings:approve',true);
-    await run({invoke,renderCount:()=>renderCount,requestQuit:quit,events,
+    await run({invoke,root,renderCount:()=>renderCount,requestQuit:quit,events,
       allWindowsClosed:()=>emit('window-all-closed'),hasQuit:()=>quitting,
       reopenHistory:async()=>{
         const store=new QueryHistoryStore(root,{isAvailable:async()=>true,encrypt:async s=>Buffer.from(s),
