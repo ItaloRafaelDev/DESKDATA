@@ -147,7 +147,9 @@ function bind<T extends unknown[]>(channel:string,operation:(...args:T)=>Promise
     try {
       if(channel==='cpi:close'||channel==='auth:logout'){
         operations.assertAccepting();
-        await cpiAuto.pause();
+        if(channel==='auth:logout'&&(maintenanceActive||sessionTransitionActive||(busy&&!cpiAuto.isActive())))
+          throw new Error('Conclua a operação atual antes de encerrar a sessão.');
+        await Promise.all([cpiAuto.pause(),cpiMonitor.stopAndWait()]);
       }
       const result=await operations.run(()=>operation(...(args as T)),exclusiveChannels.has(channel));
       void diagnostics?.write('ipc_success',{channel,durationMs:performance.now()-began}).catch(()=>{});
