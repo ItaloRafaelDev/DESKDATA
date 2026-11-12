@@ -24,7 +24,7 @@ export class AccountApprovalStore {
     try { encrypted = await readFile(this.path); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {version:1, accounts:{}};
-      throw new Error('Não foi possível ler as autorizações locais.');
+      throw new Error('Não foi possível ler as autorizações locais.', { cause: error });
     }
     if (!await this.protector.isAvailable()) throw new Error('Proteção de autorizações indisponível.');
     try {

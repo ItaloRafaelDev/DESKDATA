@@ -3,7 +3,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizePisResult, renderPisPdfHtml } from '../src/shared/pis-report.ts';
 import { DeskdataClient } from '../src/main/deskdata-client.ts';
-import { QueryHistoryStore } from '../src/main/query-history.ts';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';

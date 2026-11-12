@@ -57,10 +57,10 @@ export class DeskdataClient {
       return {httpStatus:response.status, body:parsed};
     } catch (err) {
       if (path === '/queries' && err instanceof TypeError) {
-        throw new Error('Falha de rede durante a consulta. A requisição pode ter sido recebida: não repita automaticamente.');
+        throw new Error('Falha de rede durante a consulta. A requisição pode ter sido recebida: não repita automaticamente.', { cause: err });
       }
       if ((err as Error).name === 'AbortError') {
-        throw new Error('Tempo limite de resposta. Não repita automaticamente: a consulta pode ter sido recebida e cobrada.');
+        throw new Error('Tempo limite de resposta. Não repita automaticamente: a consulta pode ter sido recebida e cobrada.', { cause: err });
       }
       throw err;
     } finally { clearTimeout(timer); }

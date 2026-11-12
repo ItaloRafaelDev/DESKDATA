@@ -62,7 +62,7 @@ export class CpiWorkflowStore {
     let cipher:Buffer;
     try {cipher=await readFile(this.path);}catch(error){
       if((error as NodeJS.ErrnoException).code==='ENOENT')return {version:1,items:[]};
-      throw new Error('Fila CPI indisponível; processamento bloqueado.');
+      throw new Error('Fila CPI indisponível; processamento bloqueado.',{cause:error});
     }
     if(!await this.protector.isAvailable())throw new Error('Proteção Windows indisponível; fila CPI bloqueada.');
     let parsed:unknown;

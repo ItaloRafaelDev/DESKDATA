@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { QueryHistoryStore } from '../src/main/query-history.ts';
 import { MaintenanceService } from '../src/main/maintenance.ts';
 
 const protector={isAvailable:async()=>true,encrypt:async text=>Buffer.from(text),decrypt:async data=>({result:data.toString(),shouldReEncrypt:false})};

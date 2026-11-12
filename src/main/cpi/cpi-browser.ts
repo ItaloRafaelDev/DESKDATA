@@ -71,7 +71,7 @@ export class CpiBrowser {
     let framesInspected = 0;
     let truncated = false;
     for (const frame of this.page.frames()) {
-      let host = '';
+      let host: string;
       try { host = new URL(frame.url()).hostname; } catch { continue; }
       if (host !== CPI_HOST) continue;
       framesInspected++;

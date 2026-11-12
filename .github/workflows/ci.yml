@@ -42,11 +42,10 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Fase 1: informativos. Passam a bloquear após a limpeza dos avisos.
-      - name: Lint (informativo)
+      - name: Lint
         run: npm run lint
-        continue-on-error: true
 
+      # Auditoria de dependências informativa; revisar na Fase 2.
       - name: Auditoria de dependências de produção (informativo)
         run: npm audit --omit=dev --audit-level=high
         continue-on-error: true

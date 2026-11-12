@@ -38,7 +38,7 @@ function App(){
   const nextNoticeId=useRef(0);
   const credentialsEdited=useRef(false);
   const dismissNotice=useCallback(()=>setNotice(null),[]);
-  const [last,setLast]=useState<QueryOutcome|null>(null);
+  const [,setLast]=useState<QueryOutcome|null>(null);
   const [historyEntries,setHistoryEntries]=useState<HistoryEntry[]>([]);
   const [recoveryCode,setRecoveryCode]=useState('');
   const [hasReport,setHasReport]=useState(false);

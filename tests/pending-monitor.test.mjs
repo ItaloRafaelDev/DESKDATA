@@ -29,8 +29,6 @@ test('encerrar sessão cancela agendamentos e ignora resposta GET tardia',async(
  assert.equal(finished.length,0);
 });
 test('falhas consecutivas pausam sem repetir POST',async()=>{
- const s=setup([new Error('HTTP 500'),new Error('HTTP 500'),new Error('HTTP 500')]);
- const prev=s.monitor;const get=s.monitor;
  // O auxiliar injeta erros como retornos; usar monitor com GET que rejeita.
  const timers=[];const errors=[];let count=0;
  const monitor=new PendingQueryMonitor({get:async()=>{count++;throw new Error('HTTP 500');},complete:async()=>assert.fail('Não pode gerar PDF'),pause:async(t,msg)=>errors.push(msg),schedule:(fn)=>{const t={fn,cancelled:false};timers.push(t);return {cancel:()=>t.cancelled=true}}});
