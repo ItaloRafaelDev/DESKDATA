@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { MaintenanceService } from '../src/main/maintenance.ts';
 
+const fsPromises=createRequire(import.meta.url)('node:fs/promises');
 const protector={isAvailable:async()=>true,encrypt:async text=>Buffer.from(text),decrypt:async data=>({result:data.toString(),shouldReEncrypt:false})};
 async function fixture(callback){
  const root=await mkdtemp(join(tmpdir(),'deskdata-cleanup-'));
@@ -66,6 +68,24 @@ test('falha em arquivo inexistente remove a referência sem enviar requisição 
  const result=await maintenance.clean({pdfs:true,history:false});
  assert.equal(result.deletedPdfs,0);assert.equal(result.missingPdfs,1);
  assert.deepEqual((await history.findById('user@example.com',record.id)).pdfPaths,[]);
+}));
+
+test('falha parcial informa a contagem sem expor caminho nem CPF do PDF',async()=>fixture(async({docs,history,record,maintenance})=>{
+ const second=join(docs,'RELATORIO_11144477735_2026-10-30.pdf');await writeFile(second,'generated');
+ const other=await history.begin('user@example.com','11144477735');await history.addPdf(other.id,second);
+ const original=fsPromises.unlink;let calls=0;
+ // O segundo unlink falha com erro de fs cujo texto contém o caminho (e o CPF) do PDF.
+ fsPromises.unlink=async file=>{if(++calls===2)throw Object.assign(new Error(`EPERM: operation not permitted, unlink '${file}'`),{code:'EPERM',path:file});return original(file);};
+ syncBuiltinESMExports();
+ try{
+  const error=await maintenance.clean({pdfs:true,history:false}).then(()=>null,caught=>caught);
+  assert.ok(error,'a limpeza deveria falhar.');
+  assert.match(error.message,/^Limpeza parcial\. 1 PDF\(s\) excluído\(s\)/);
+  assert.doesNotMatch(error.message,/52998224725|11144477735|RELATORIO|EPERM|[\\/]/);
+  assert.equal(error.cause,undefined);
+  const remaining=[...(await history.findById('user@example.com',record.id)).pdfPaths,...(await history.findById('user@example.com',other.id)).pdfPaths];
+  assert.equal(remaining.length,1);
+ }finally{fsPromises.unlink=original;syncBuiltinESMExports();}
 }));
 
 test('valida seleção e não inicia limpeza sem opções',async()=>fixture(async({maintenance})=>{
