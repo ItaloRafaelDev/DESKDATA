@@ -44,11 +44,11 @@ export class MaintenanceService {
             await unlink(file);
             cleared.add(file);deletedPdfs++;
           }
-        }catch(error){
+        }catch{
           // Se ocorrer falha parcial, preservar as referências dos arquivos que não foram removidos.
+          // A causa (erro de fs) contém o caminho do PDF (RELATORIO_<CPF>_...) e não é exposta.
           await this.history.removePdfReferences(cleared);
-          // eslint-disable-next-line preserve-caught-error -- a causa é erro de fs com o caminho do PDF (RELATORIO_<CPF>_...), que não pode ir para logs.
-          throw new Error(`Limpeza parcial. ${deletedPdfs} PDF(s) excluído(s); os demais registros foram preservados. ${error instanceof Error?error.message:'Falha ao excluir arquivo.'}`);
+          throw new Error(`Limpeza parcial. ${deletedPdfs} PDF(s) excluído(s); os demais registros foram preservados. Não foi possível excluir um dos arquivos.`);
         }
       }
       if(selection.history)await this.history.clearAll();
