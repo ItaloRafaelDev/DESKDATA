@@ -157,3 +157,30 @@ test('CPI: template homologado fora de h2 usa os mesmos IDs no upload e confirma
   assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',2000),'confirmed');
   assert.equal(posts(),1);
 }));
+
+test('CPI: reconciliação lê resposta persistida sem POST e correlaciona o formulário aberto',()=>portalFixture({},async({driver,page,posts})=>{
+ const frame=await (await page.locator('#sb-content').elementHandle()).contentFrame();
+ await page.route('**/mod_tt_pesq_upd.aspx*',route=>route.fulfill({contentType:'text/html',body:persisted()}));
+ await frame.evaluate(html=>{document.open();document.write(html);document.close();},persisted());
+ assert.equal(await driver.inspectPersistedPersonResponse(ids,'information','52998224725'),'confirmed');
+ assert.equal(posts(),0);
+ assert.equal(await driver.inspectPersistedPersonResponse({...ids,pesquisaId:'1537987'},'information','52998224725'),'unavailable');
+}));
+
+test('CPI: reconciliação não confirma classificação divergente nem campos ausentes',()=>portalFixture({},async({driver,page,posts})=>{
+ const frame=await (await page.locator('#sb-content').elementHandle()).contentFrame();
+ await page.route('**/mod_tt_pesq_upd.aspx*',route=>route.fulfill({contentType:'text/html',body:persisted({omit:'pdf'})}));
+ await frame.evaluate(html=>{document.open();document.write(html);document.close();},persisted({omit:'pdf'}));
+ assert.equal(await driver.inspectPersistedPersonResponse(ids,'information','52998224725'),'unverified');
+ await frame.evaluate(html=>{document.open();document.write(html);document.close();},persisted());
+ await page.route('**/mod_tt_pesq_upd.aspx*',route=>route.fulfill({contentType:'text/html',body:persisted()}));
+ assert.equal(await driver.inspectPersistedPersonResponse(ids,'restrictions','52998224725'),'unverified');
+ assert.equal(posts(),0);
+}));
+
+test('CPI: formulário em memória sem persistência após GET não conclui reconciliação',()=>portalFixture({},async({driver,page,posts})=>{
+ const frame=await (await page.locator('#sb-content').elementHandle()).contentFrame();
+ await frame.evaluate(html=>{document.open();document.write(html);document.close();},persisted());
+ assert.equal(await driver.inspectPersistedPersonResponse(ids,'information','52998224725'),'unverified');
+ assert.equal(posts(),0);
+}));

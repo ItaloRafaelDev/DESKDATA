@@ -11,6 +11,8 @@ const api:DesktopApi={
     return ()=>ipcRenderer.removeListener('cpi:auto:updated',listener);
   },
   cpiHistory:()=>ipcRenderer.invoke('cpi:history:list'),
+  cpiPendingWorkflows:(page,pageSize)=>ipcRenderer.invoke('cpi:workflow:pending',page,pageSize),
+  cpiVerifyWorkflow:ids=>ipcRenderer.invoke('cpi:workflow:verify',ids),
   cpiOpenHistoryPdf:ids=>ipcRenderer.invoke('cpi:history:open-pdf',ids),
   cpiOpen:()=>ipcRenderer.invoke('cpi:open'),
   cpiStatus:()=>ipcRenderer.invoke('cpi:status'),

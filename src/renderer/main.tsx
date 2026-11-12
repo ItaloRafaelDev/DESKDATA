@@ -3,9 +3,10 @@ import { createRoot } from 'react-dom/client';
 import { cnpjDigits, formatCnpj, isValidCnpj } from '../shared/cnpj.ts';
 import { cpfDigits, formatCpf, isValidCpf } from '../shared/cpf.ts';
 import { CPI_MIN_INTERVAL_SECONDS, CPI_MAX_INTERVAL_SECONDS, parseCpiMonitorIntervalInput, getCpiRemainingSeconds, formatCpiCountdown } from '../shared/cpi-monitor-time.ts';
-import type { AppSettings, QueryOutcome, HistoryEntry, QueryExecution, PisQueryExecution, MaintenancePreview, CpiBrowserStatus, CpiHistoryOverview, CpiPendingRowId, CpiAutoSnapshot } from '../shared/types.ts';
+import type { AppSettings, QueryOutcome, HistoryEntry, QueryExecution, PisQueryExecution, MaintenancePreview, CpiBrowserStatus, CpiHistoryOverview, CpiPendingWorkflowPage, CpiPendingRowId, CpiAutoSnapshot } from '../shared/types.ts';
 import { loadRememberedLogin } from './ux.ts';
 import { Icon, ToastHost, type Notification } from './ui.tsx';
+import { CpiPendingPanel } from './CpiPendingPanel.tsx';
 import './styles.css';
 
 const DATASET_LABELS=['Dados básicos','Telefones','Endereços','E-mails','Processos judiciais'];
@@ -29,6 +30,8 @@ function App(){
   const [cpiStatus,setCpiStatus]=useState<CpiBrowserStatus>({state:'closed'});
   const [cpiAuto,setCpiAuto]=useState<CpiAutoSnapshot|null>(null);
   const [cpiHistory,setCpiHistory]=useState<CpiHistoryOverview|null>(null);
+  const [cpiPending,setCpiPending]=useState<CpiPendingWorkflowPage|null>(null);
+  const [cpiPendingPage,setCpiPendingPage]=useState(0);
   const [cpiIntervalInput,setCpiIntervalInput]=useState('60');
   const [cpiClockMs,setCpiClockMs]=useState(()=>Date.now());
   const [notice,setNotice]=useState<Notification|null>(null);
@@ -184,7 +187,7 @@ function App(){
     setLast(result);setHasReport(true);setCanReprocess(false);await refreshHistory();
     show(`Resposta reprocessada sem nova consulta: ${reportFilename(result.path)}`,'success');
   });}
-  function logout(){void run(async()=>{await window.deskdata.logout();setTab('acesso');setLogged(false);setCreditBalance(null);setLast(null);setHasReport(false);setCanReprocess(false);setHistoryEntries([]);setPisEntries([]);setCompanyEntries([]);setCpiStatus({state:'closed'});setCpiHistory(null);setCpiAuto(null);setSettings(current=>({...current,paidQueriesApproved:false}));show('Sessão encerrada.','success');});}
+  function logout(){void run(async()=>{await window.deskdata.logout();setTab('acesso');setLogged(false);setCreditBalance(null);setLast(null);setHasReport(false);setCanReprocess(false);setHistoryEntries([]);setPisEntries([]);setCompanyEntries([]);setCpiStatus({state:'closed'});setCpiHistory(null);setCpiPending(null);setCpiPendingPage(0);setCpiAuto(null);setSettings(current=>({...current,paidQueriesApproved:false}));show('Sessão encerrada.','success');});}
   function recover(event:FormEvent){event.preventDefault();void run(async()=>{
     const result=await window.deskdata.recoverByCode(cpfDigits(cpf),recoveryCode.trim().toUpperCase());
     showExecution(result,'CPF');
@@ -257,8 +260,22 @@ function App(){
   });}
   async function refreshCpiHistory(){await run(async()=>{
     setCpiHistory(await window.deskdata.cpiHistory());
+    setCpiPending(await window.deskdata.cpiPendingWorkflows(cpiPendingPage,20));
     try{setCreditBalance(await window.deskdata.credits());}
     catch{setCreditBalance(null);}
+  });}
+  async function changeCpiPendingPage(page:number){await run(async()=>{
+    setCpiPending(await window.deskdata.cpiPendingWorkflows(page,20));
+    setCpiPendingPage(page);
+  });}
+  async function verifyCpiWorkflow(ids:CpiPendingRowId){await run(async()=>{
+    const result=await window.deskdata.cpiVerifyWorkflow(ids);
+    setCpiPending(await window.deskdata.cpiPendingWorkflows(cpiPendingPage,20));
+    setCpiHistory(await window.deskdata.cpiHistory());
+    show(result.reason==='confirmed'?'Persistência CPI confirmada para esta pesquisa.':
+      result.reason==='local_incomplete'?'Vínculo local ou PDF insuficiente; pesquisa permanece bloqueada.':
+      result.reason==='remote_unavailable'?'Abra manualmente o detalhe exato da pesquisa no Edge e tente verificar novamente.':
+      'A CPI não apresentou evidência suficiente; pesquisa permanece bloqueada.',result.reason==='confirmed'?'success':'info');
   });}
   async function openCpiHistoryPdf(ids:CpiPendingRowId){await run(()=>window.deskdata.cpiOpenHistoryPdf(ids));}
   useEffect(()=>{
@@ -266,6 +283,7 @@ function App(){
     let active=true;
     const refresh=()=>{
       void window.deskdata.cpiHistory().then(v=>{if(active)setCpiHistory(v);}).catch(()=>{});
+      void window.deskdata.cpiPendingWorkflows(cpiPendingPage,20).then(v=>{if(active)setCpiPending(v);}).catch(()=>{});
       void window.deskdata.credits().then(v=>{if(active)setCreditBalance(v);}).catch(()=>{if(active)setCreditBalance(null);});
     };
     void window.deskdata.cpiStatus().then(v=>{if(active)setCpiStatus(v);}).catch(()=>{});
@@ -276,7 +294,7 @@ function App(){
       void window.deskdata.cpiStatus().then(v=>{if(active)setCpiStatus(v);}).catch(()=>{});
     },5000);
     return ()=>{active=false;unsubscribe();window.clearInterval(statusTimer);};
-  },[logged,tab]);
+  },[logged,tab,cpiPendingPage]);
   useEffect(()=>{
     if(!logged || tab!=='cpi')return;
     void window.deskdata.cpiHistory().then(setCpiHistory).catch(()=>{});
@@ -405,6 +423,7 @@ function App(){
       {cpiHistory&&cpiHistory.completedCount>cpiHistory.items.length?<p className="hint">Exibindo as {cpiHistory.items.length} respostas mais recentes de {cpiHistory.completedCount} registros.</p>:null}
       {cpiHistory?.reviewCount?<p className="hint cpi-review-notice">Existem {cpiHistory.reviewCount} solicitações que exigem conferência antes de qualquer reprocessamento. O agente não realizará envios duplicados.</p>:null}
     </section>
+    <CpiPendingPanel value={cpiPending} page={cpiPendingPage} busy={busy} canVerify={cpiBrowserOpen&&!cpiAutoRunning} onPage={page=>void changeCpiPendingPage(page)} onVerify={ids=>void verifyCpiWorkflow(ids)} onRefresh={()=>void refreshCpiHistory()}/>
   </>:tab==='configurar'?<><div className="page-heading"><div><p className="eyebrow">PREFERÊNCIAS LOCAIS</p><h1>Configurações</h1><p>Defina estas opções uma vez. Não será necessário selecioná-las em cada consulta.</p></div></div><section className="panel settings-panel"><div className="panel-heading"><h2>Pasta de saída dos PDFs</h2><p>Os relatórios serão salvos automaticamente na pasta selecionada.</p></div><div className="folder"><span>{settings.outputFolder??'Nenhuma pasta selecionada'}</span><button type="button" className="secondary" disabled={busy} onClick={()=>void folder()}>Selecionar pasta</button></div><div className="divider"/><div className="panel-heading"><h2>Backup do histórico</h2><p>Crie uma cópia ZIP dos registros cifrados, da chave protegida e das configurações essenciais. Não inclui senhas nem PDFs.</p></div>
     <div className="backup-actions"><button type="button" className="primary" disabled={busy} onClick={()=>void createBackup()}><Icon name="file" size={17}/> Criar backup ZIP</button><button type="button" className="secondary" disabled={busy} onClick={()=>void openBackupFolder()}><Icon name="folder" size={17}/> Abrir pasta de backups</button></div>
     {backupInfo?<p className="hint backup-path" title={backupInfo}>Último backup: {backupInfo}</p>:null}
