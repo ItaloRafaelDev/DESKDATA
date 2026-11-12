@@ -59,7 +59,7 @@ export interface CpiHistoryOverview {
   reviewCount: number;
   items: CpiHistoryItem[];
 }
-export type CpiPendingWorkflowStage='review_required'|'verification_required'|'submit_started';
+export type CpiPendingWorkflowStage='review_required'|'verification_required'|'submit_started'|'query_started';
 export type CpiVerificationReason='confirmed'|'remote_unverified'|'remote_unavailable'|'local_incomplete';
 export interface CpiPendingWorkflowItem extends CpiPendingRowId {
   stage:CpiPendingWorkflowStage;

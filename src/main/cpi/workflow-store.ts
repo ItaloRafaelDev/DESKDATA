@@ -102,7 +102,7 @@ export class CpiWorkflowStore {
     if(!Number.isSafeInteger(page)||page<0||!Number.isSafeInteger(pageSize)||pageSize<1||pageSize>100)throw new Error('Paginação CPI inválida.');
     await this.queue;
     const pending=(await this.read()).items.filter(row=>row.account===account.trim().toLowerCase()&&
-      ['review_required','verification_required','submit_started'].includes(row.stage))
+      ['review_required','verification_required','submit_started','query_started'].includes(row.stage))
       .sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
     return {total:pending.length,page,pageSize,items:pending.slice(page*pageSize,(page+1)*pageSize).map(row=>({...row}))};
   }

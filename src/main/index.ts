@@ -560,7 +560,7 @@ if(instanceLock)app.whenReady().then(()=>{
     const who=account();
     const items=await cpiWorkflow.list(who);
     const completed=items.filter(item=>item.stage==='completed');
-    const reviewCount=items.filter(item=>['verification_required','review_required','submit_started'].includes(item.stage)).length;
+    const reviewCount=items.filter(item=>['verification_required','review_required','submit_started','query_started'].includes(item.stage)).length;
     const recent=await Promise.all(completed.slice(0,100).map(async item=>{
       let pdfAvailable=false;
       if(item.historyRecordId){
