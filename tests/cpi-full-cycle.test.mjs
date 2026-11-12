@@ -52,11 +52,11 @@ test('resposta judicial sem dataset completo bloqueia envio',async()=>{
   await assert.rejects(executeCpiPersonCycle(s),/Dataset/);
   assert.equal(events.includes('submit_started'),false);
 });
-import {mkdtemp,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,realpath,writeFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 
 test('ciclo completo simulado: um POST, PDF correto, resposta Há Informações e estado concluído',async()=>{
-  const dir=await mkdtemp(join(tmpdir(),'deskdata-cpi-cycle-'));
+  const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-cycle-')));
   try{
     let uploadCount=0, savedPath='';
     const {s,events}=services({
@@ -82,7 +82,7 @@ test('ciclo completo simulado: um POST, PDF correto, resposta Há Informações 
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 test('processo Criminal vira restrições; envio sem confirmação fica travado',async()=>{
-  const dir=await mkdtemp(join(tmpdir(),'deskdata-cpi-cycle-'));
+  const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-cycle-')));
   try{
     const payload={...data,data:{...data.data,lawsuits:{items:[{court_type:'Criminal',number:'000'}]}}};
     let uploads=0;
@@ -103,7 +103,7 @@ test('processo Criminal vira restrições; envio sem confirmação fica travado'
 });
 
 test('resposta persistida com falha no fechamento nao e reenviada e exige revisao',async()=>{
-  const dir=await mkdtemp(join(tmpdir(),'deskdata-cpi-close-'));
+  const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-close-')));
   try{
     let uploads=0,closeCalls=0;
     const {s,events}=services({outputFolder:dir,

@@ -38,3 +38,8 @@ logs/
 *.key
 credentials.json
 secrets.json
+
+# Artefatos locais
+*.diff
+*.patch
+testes-removidos.txt

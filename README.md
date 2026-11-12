@@ -19,8 +19,8 @@ As consultas novas podem consumir créditos da Deskdata. O aplicativo exige auto
 ### Requisitos
 
 - Windows 11 de 64 bits.
-- Node.js 22 e npm.
-- Git, Microsoft Edge e acesso a este repositório privado.
+- Node.js 24 e npm.
+- Git, Microsoft Edge e acesso ao repositório.
 - Credenciais da Deskdata e, para a automação, acesso autorizado ao portal administrativo da CPI Central.
 
 No PowerShell, execute:
@@ -34,7 +34,7 @@ npm run dev
 
 Nas próximas vezes, basta abrir a pasta do projeto e executar `npm run dev`.
 
-Se o acesso ao repositório privado falhar, confira sua autenticação no GitHub. Para atualizar uma instalação já modificada, revise `git status` antes de trazer mudanças.
+Se o acesso ao repositório falhar, confira sua autenticação no GitHub. Para atualizar uma instalação já modificada, revise `git status` antes de trazer mudanças.
 
 ## Primeiro acesso
 

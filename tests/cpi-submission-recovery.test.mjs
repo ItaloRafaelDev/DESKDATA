@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp,writeFile,readFile,rm } from 'node:fs/promises';
+import { mkdtemp,realpath,writeFile,readFile,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CpiWorkflowStore } from '../src/main/cpi/workflow-store.ts';
@@ -12,7 +12,7 @@ const protector={isAvailable:async()=>true,encrypt:async text=>Buffer.from(text)
 
 for(const mode of ['unverified','exception','not_submitted','submit_started']){
   test(`CPI: reinício após ${mode} preserva PDF/classificação e bloqueia reenvio antes de abrir o detalhe`,async()=>{
-    const dir=await mkdtemp(join(tmpdir(),'deskdata-cpi-reconcile-'));
+    const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-reconcile-')));
     try{
       const path=join(dir,`RELATORIO_${cpf}_2026-11-11.pdf`),bytes=Buffer.from('%PDF-1.4\n'+'fixture'.repeat(30));
       await writeFile(path,bytes);
