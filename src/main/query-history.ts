@@ -197,6 +197,17 @@ export class QueryHistoryStore {
       return row?this.decode(row):null;
     });
   }
+  /** P8 (E5): vários registros da conta num único bloqueio e numa única consulta; ids inválidos são ignorados. */
+  async findManyById(account:string,ids:readonly string[]):Promise<Map<string,QueryRecord>>{
+    const wanted=[...new Set(ids.filter(id=>/^[a-f0-9-]{36}$/i.test(id)))];
+    if(!wanted.length)return new Map();
+    return this.lock(async db=>{
+      const rows=db.prepare(`SELECT id,payload FROM records WHERE account_key=? AND id IN (${wanted.map(()=>'?').join(',')})`)
+        .all(this.hash(account),...wanted) as SqlRow[];
+      const records=await Promise.all(rows.map(row=>this.decode(row)));
+      return new Map(records.map(record=>[record.id,record]));
+    });
+  }
   private async insert(account:string,kind:Kind,cpf:string,cnpj?:string):Promise<QueryRecord>{
     const normalized=account.trim().toLowerCase();if(!normalized)throw Error('Conta inválida.');
     return this.lock(async db=>{

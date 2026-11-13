@@ -7,7 +7,9 @@ import { prepareCpiPersonPdf } from '../cpi/person-recovery.ts';
 import { validateCpiRowId } from '../cpi/pending-rows.ts';
 import { reconcileCpiWorkflow } from '../cpi/workflow-reconciliation.ts';
 import { findCpiPersonPdf } from '../cpi/person-pdf.ts';
-import { saveCpiPdf } from '../cpi/full-auto-orchestrator.ts';import type { Bind } from './bind.ts';
+import { saveCpiPdf } from '../cpi/full-auto-orchestrator.ts';
+import { buildCpiHistoryOverview } from '../cpi/history-overview.ts';
+import type { Bind } from './bind.ts';
 import { account, validateStoredPdf, type MainContext } from './context.ts';
 import { pending } from './recovery.ts';
 
@@ -20,23 +22,7 @@ export function registerCpiIpc(bind: Bind, ctx: MainContext): void {
   const busyCpi = () => cpiMonitor.isActive() || cpiAuto.isActive();
   bind('cpiHistory', async () => {
     const who = account(ctx);
-    const items = await cpiWorkflow.list(who);
-    const completed = items.filter(item => item.stage === 'completed');
-    const reviewCount = items.filter(item => ['verification_required', 'review_required', 'submit_started', 'query_started'].includes(item.stage)).length;
-    const recent = await Promise.all(completed.slice(0, 100).map(async item => {
-      let pdfAvailable = false;
-      if (item.historyRecordId) {
-        const record = await history.findById(who, item.historyRecordId);
-        if (record && (record.kind === 'person' || record.kind === undefined) && record.account === who) {
-          for (const path of record.pdfPaths) {
-            if (await validateStoredPdf(path)) { pdfAvailable = true; break; }
-          }
-        }
-      }
-      return { pesquisaId: item.pesquisaId, solicitacaoId: item.solicitacaoId,
-        classification: item.classification ?? 'information', answeredAt: item.updatedAt, pdfAvailable };
-    }));
-    return { completedCount: completed.length, reviewCount, items: recent };
+    return buildCpiHistoryOverview(who, await cpiWorkflow.list(who), history);
   });
   bind('cpiPendingWorkflows', async (page, pageSize) => {
     const who = account(ctx);
