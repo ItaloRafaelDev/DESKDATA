@@ -12,7 +12,7 @@ import { CpiBrowser, CPI_OPERATION_TIMEOUTS } from '../src/main/cpi/cpi-browser.
 import { CpiPendingMonitor } from '../src/main/cpi/pending-monitor.ts';
 import { CPI_PENDING_URL } from '../src/main/cpi/pending-filter.ts';
 import { classifyCpiError } from '../src/main/cpi/failure-classes.ts';
-import { portalFixture, ids } from './helpers/cpi-portal.mjs';
+import { realPortalFixture, ids } from './helpers/cpi-portal-real.mjs';
 import { withMainProcess } from './helpers/main-process.mjs';
 
 // E3: para cada classe de espera, um fake que nunca resolve precisa gerar erro classificado dentro do prazo
@@ -271,22 +271,21 @@ test('E3/C9: parar o monitor com leitura do filtro presa termina no prazo do fil
 });
 
 // ---------- salvar na CPI (W13–W16): portal simulado em Edge headless, sem rede ----------
-test('E3/W13: prazo do salvamento antes do anexo devolve not_submitted e o corpo tardio não anexa nem clica',()=>portalFixture({},async({driver,pdf,posts,attachedFile})=>{
+test('E3/W13: prazo do salvamento antes do anexo devolve not_submitted e o corpo tardio não anexa nem clica',()=>realPortalFixture({},async({driver,frame,pdf,saves})=>{
   driver.timeouts={...driver.timeouts,save:100};
   const original=driver.readDetailFrame.bind(driver);const gate=deferred();
   driver.readDetailFrame=async(...args)=>{await gate.promise;return original(...args);};
   assert.equal(await within(2000,()=>driver.uploadAndSavePersonResponse(ids,pdf,'information',100)),'not_submitted');
   gate.resolve();await wait(1500);
-  assert.equal(posts(),0);assert.equal(attachedFile(),null);
+  assert.equal(saves().length,0);
+  assert.equal(await frame().locator('#MainPage_FileUpload1').evaluate(input=>input.files.length),0);
 }));
-test('E3/W16: espera sem fim depois do clique em Alterar vira unverified, sem segundo envio',()=>portalFixture({},async({driver,pdf,posts})=>{
-  const reached=deferred();
-  driver.savedResponseEvidence=()=>{reached.resolve();return hang();};
-  const saving=driver.uploadAndSavePersonResponse(ids,pdf,'information',2000);
-  await reached.promise;
+test('E3/W16: espera sem fim depois do clique em Alterar vira unverified, sem segundo envio',()=>realPortalFixture({keepOpen:true},async({driver,pdf,saves})=>{
+  const saving=driver.uploadAndSavePersonResponse(ids,pdf,'information',20000);
+  await until(()=>saves().length===1);
   // Simula cpi:close sem encerrar o navegador do fixture: mesmo caminho de cancelamento do prazo.
   driver.session.abort();
-  assert.equal(await within(500,()=>saving),'unverified');
-  await wait(300);assert.equal(posts(),1);
+  assert.equal(await within(1000,()=>saving),'unverified');
+  await wait(300);assert.equal(saves().length,1);
   await assert.rejects(driver.closeCompletedDetail(ids),/resposta não confirmada/);
 }));

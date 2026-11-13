@@ -1,3 +1,4 @@
+import { basename } from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page, type Frame, type Request } from 'playwright-core';
 import { filterPendingPerson29, readListingCount, type CpiPendingFilterResult } from './pending-filter.ts';
 import { inspectPendingPerson29Rows, validateCpiRowId, type CpiPendingRowId, type CpiPendingRowsInspection } from './pending-rows.ts';
@@ -23,15 +24,18 @@ export const CPI_OPERATION_TIMEOUTS = {
 };
 export type CpiOperationTimeouts = typeof CPI_OPERATION_TIMEOUTS;
 /** Estado do salvamento visível ao chamador, que decide no estouro do prazo sem esperar o corpo. */
+/** `effectsPossible`: o clique em "Alterar" pode ter ocorrido (só a partir do checkpoint `submit_started`). */
+interface SaveProgress { effectsPossible: boolean; endStep: EndStep | null }
 /**
- * `effectsPossible`: o clique em "Alterar" pode ter ocorrido (só a partir do checkpoint `submit_started`).
- * `postback`: o portal fez POST/navegação no frame antes do clique; nada foi salvo pelo agente, mas o formulário
- * pode ter sido enviado pelo próprio portal (vai para revisão, nunca para reprocessamento automático).
+ * `confirmed`: confirmação aceita e modal fechado (a listagem é conferida em `closeCompletedDetail`).
+ * `confirm_mismatch`: texto da confirmação divergente; cancelada, nada enviado (revisão manual).
  */
-interface SaveProgress { effectsPossible: boolean; postback: boolean; endStep: EndStep | null }
-export type CpiSaveResult = 'confirmed' | 'confirmed_auxiliary_404' | 'unverified' | 'not_submitted' | 'not_submitted_postback';
+export type CpiSaveResult = 'confirmed' | 'confirmed_auxiliary_404' | 'unverified' | 'not_submitted' | 'confirm_mismatch';
+/** Rótulos dos radios `consta` do portal ("Nada Consta" nunca é automático). */
+export const CPI_RESULT_LABELS = { information: 'Há Informações', restrictions: 'Sim, Consta Restrições' } as const;
+export type CpiDiagnosticsSink = (event: string, fields: Record<string, unknown>) => void;
 /** Motivos fixos da falha antes do clique (vão ao diagnóstico como `errorType`; nunca contêm dados da pesquisa). */
-type SaveFailure = 'CpiDetailError' | 'CpiIdentityChangedError' | 'CpiEarlyPostbackError' | 'CpiFormFieldError' | 'CpiResultRadioError' |
+type SaveFailure = 'CpiDetailError' | 'CpiIdentityChangedError' | 'CpiFrameReloadError' | 'CpiFormFieldError' | 'CpiResultRadioError' |
   'CpiFileInputError' | 'CpiSaveButtonError' | 'CpiFormActionError' | 'CpiAttachRejectedError' | 'CpiCheckpointError';
 function saveFailure(name: SaveFailure, message: string, cause?: unknown): Error {
   return Object.assign(new Error(message, cause === undefined ? undefined : { cause }), { name });
@@ -57,6 +61,9 @@ export class CpiBrowser {
   private lastMappedRows: CpiPendingRowId[] = [];
   private lastReadCpf: {ids: CpiPendingRowId; cpf: string; frame:Frame} | null = null;
   private lastConfirmedSave: (CpiPendingRowId & {frame:Frame}) | null = null;
+  private diagnostics: CpiDiagnosticsSink | null = null;
+  /** Diagnóstico sanitizado (só nomes fixos, método e caminho); nunca recebe dados da pesquisa. */
+  setDiagnostics(sink: CpiDiagnosticsSink | null): void { this.diagnostics = sink; }
   /** Abortado por `close()`: toda operação em curso para no próximo ponto de verificação. */
   private session = new AbortController();
   private readonly timeouts: CpiOperationTimeouts;
@@ -368,7 +375,7 @@ export class CpiBrowser {
   }
 
   /** Fecha somente o modal da pesquisa que já foi confirmada; nunca fecha em envio incerto. */
-  async closeCompletedDetail(ids: CpiPendingRowId): Promise<void> {
+  async closeCompletedDetail(ids: CpiPendingRowId, listingTimeoutMs = 20000): Promise<void> {
     if (!this.page || this.status().state !== 'open' || !this.lastConfirmedSave ||
         this.lastConfirmedSave.pesquisaId !== ids.pesquisaId ||
         this.lastConfirmedSave.solicitacaoId !== ids.solicitacaoId) {
@@ -381,7 +388,7 @@ export class CpiBrowser {
       await this.closeShadowbox(page, ids, confirmedFrame, signal, 'O formulário CPI mudou após a confirmação. Não fechar outro registro.');
       // A CPI pode manter os dados da tabela em cache depois de fechar a Shadowbox.
       // A proxima solicitacao so e liberada apos uma leitura atualizada e estavel.
-      await refreshPendingAfterConfirmedSave(page, ids, 20000, signal);
+      await refreshPendingAfterConfirmedSave(page, ids, listingTimeoutMs, signal);
       throwIfAborted(signal, 'cpi_close_detail');
     });
     this.lastFilter = null;
@@ -407,16 +414,12 @@ export class CpiBrowser {
     this.lastMappedRows = [];
     this.lastReadCpf = null;
   }
-  /** Fecha a Shadowbox "Responder / Atualizar Pesquisa" do frame indicado pelo controle `Shadowbox.close()`. */
+  /** Fecha a Shadowbox da pesquisa pelo controle do portal `a#sb-nav-close` (`Shadowbox.close()`), sem salvar. */
   private async closeShadowbox(page: Page, ids: CpiPendingRowId, expectedFrame: Frame, signal: AbortSignal, frameChanged: string): Promise<void> {
     const modal = page.locator('#sb-container');
     if (!await modal.isVisible().catch(() => false)) return;
     if ((await this.readDetailFrame(ids))?.frame !== expectedFrame) throw new Error(frameChanged);
-    const title = (await page.locator('#sb-title-inner').innerText({timeout:4000})).trim();
-    if (!/Responder\s*\/\s*Atualizar Pesquisa/i.test(title)) {
-      throw new Error('Modal CPI inesperado. Fechamento manual necessário.');
-    }
-    const button = page.locator('#sb-title-inner [title="Fechar"]');
+    const button = page.locator('a#sb-nav-close');
     if (await button.count() !== 1 || !/Shadowbox\.close\s*\(\s*\)/i.test(await button.getAttribute('onclick') ?? '')) {
       throw new Error('Controle único de fechamento da pesquisa CPI não confirmado.');
     }
@@ -428,11 +431,11 @@ export class CpiBrowser {
   /**
    * Preenche, anexa e salva: anexar → conferir o arquivo no input → `beforeSubmit` (checkpoint `submit_started`)
    * → clicar em "Alterar" → aceitar a confirmação → exigir a resposta correlacionada. Sem reabrir o registro depois.
-   * Falha antes do clique devolve `not_submitted` (nada salvo pelo agente) ou `not_submitted_postback`;
+   * Falha antes do clique devolve `not_submitted` (nada salvo); confirmação divergente, `confirm_mismatch`;
    * só depois do checkpoint o resultado pode ser `unverified`.
    */
   async uploadAndSavePersonResponse(ids: CpiPendingRowId, pdfPath: string, classification: 'restrictions' | 'information', confirmationTimeoutMs=20000, timer: Pick<StepTimer,'begin'> = NULL_TIMER, beforeSubmit: () => Promise<void> = async () => {}): Promise<CpiSaveResult> {
-    const progress: SaveProgress = {effectsPossible:false, postback:false, endStep:null};
+    const progress: SaveProgress = {effectsPossible:false, endStep:null};
     try {
       return await this.bounded('cpi_save', this.timeouts.save + confirmationTimeoutMs, signal =>
         this.saveResponse(ids, pdfPath, classification, confirmationTimeoutMs, timer, signal, progress, beforeSubmit));
@@ -440,22 +443,24 @@ export class CpiBrowser {
       // Só prazo estourado ou cancelamento chegam aqui (o corpo converte as próprias falhas).
       // Nunca repetir: com efeito possível o resultado é incerto ('unverified' → verification_required).
       progress.endStep?.('failed', error);
-      return progress.effectsPossible ? 'unverified' : progress.postback ? 'not_submitted_postback' : 'not_submitted';
+      return progress.effectsPossible ? 'unverified' : 'not_submitted';
     }
   }
   private async saveResponse(ids: CpiPendingRowId, pdfPath: string, classification: 'restrictions' | 'information', confirmationTimeoutMs: number, timer: Pick<StepTimer,'begin'>, signal: AbortSignal, progress: SaveProgress, beforeSubmit: () => Promise<void>): Promise<CpiSaveResult> {
     let effectsPossible=false;
-    let earlyPostback=false;
+    let frameReloaded=false;
     let saved=false;
-    let watchedPage:Page|null=null;
-    let observeEarlyEffects:((request:Request)=>void)|null=null;
-    // `progress` é compartilhado com o chamador: no estouro do prazo ele decide sem esperar este corpo.
-    // A etapa aberta (progress.endStep) é encerrada como falha no finally se não houve confirmação.
-    const markEffects=():void=>{effectsPossible=true;progress.effectsPossible=true;};
     let failure:unknown;
+    let watchedPage:Page|null=null;
+    let observeRequest:((request:Request)=>void)|null=null;
+    let observeNavigation:((changed:Frame)=>void)|null=null;
+    // `progress` é compartilhado com o chamador: no estouro do prazo ele decide sem esperar este corpo.
+    const markEffects=():void=>{effectsPossible=true;progress.effectsPossible=true;};
     const beginStep=(step:'cpi_fill'|'cpi_attach'|'cpi_save'):void=>{progress.endStep=timer.begin(step);};
+    const label=CPI_RESULT_LABELS[classification];
     try {
     if (!this.page || this.status().state !== 'open') throw saveFailure('CpiDetailError','Sessão CPI indisponível.');
+    // Passo 1: o cabeçalho do modal confere pesquisa e solicitação (validateCpiPersonDetails) e o CPF lido no ciclo.
     const detail = await this.readDetailFrame(ids);
     if (!detail) throw saveFailure('CpiDetailError','Detalhes CPI não estão abertos. Não é seguro anexar o PDF.');
     const checked = validateCpiPersonDetails(ids, detail.raw);
@@ -465,172 +470,111 @@ export class CpiBrowser {
     const frame=detail.frame;
     if(frame!==this.lastReadCpf?.frame)throw saveFailure('CpiIdentityChangedError','O frame CPI mudou desde a leitura da identidade.');
     beginStep('cpi_fill');
-    // Mudanças em controles também podem disparar postbacks no portal legado.
+    // Antes do clique em "Alterar", Status e Resultado só chamam funções locais (change_status, change_consta).
+    // Só a navegação/recarga do iframe do modal é falha (nada salvo: fecha sem salvar e mantém pdf_ready).
+    // XHR/fetch do próprio portal não é motivo de revisão: registra só método e caminho (sem query string).
     watchedPage=page;
-    observeEarlyEffects=request=>{
-      // Antes do clique: requisição do próprio portal (não do agente). Fica registrada à parte de `effectsPossible`.
-      try{if(!effectsPossible&&request.frame()===frame&&(request.method()==='POST'||request.isNavigationRequest())){earlyPostback=true;progress.postback=true;}}
-      catch{/* Requisição sem frame não fornece prova de ausência de efeitos. */}
+    observeRequest=request=>{
+      try{
+        if(effectsPossible||request.frame()!==frame)return;
+        if(request.isNavigationRequest()){frameReloaded=true;return;}
+        const type=request.resourceType();
+        if(type==='xhr'||type==='fetch')this.reportPortalRequest(request);
+      }catch{/* Requisição sem frame não pertence ao formulário. */}
     };
-    page.on('request',observeEarlyEffects);
+    observeNavigation=changed=>{if(!effectsPossible&&changed===frame)frameReloaded=true;};
+    page.on('request',observeRequest);
+    page.on('framenavigated',observeNavigation);
+    const reloaded=()=>saveFailure('CpiFrameReloadError','O formulário da pesquisa CPI foi recarregado antes do envio; nada foi salvo.');
     const assertIdentity=async()=>{
-      if(earlyPostback)throw saveFailure('CpiEarlyPostbackError','Postback CPI observado antes do salvamento; formulário não enviado pelo agente.');
+      if(frameReloaded)throw reloaded();
       const current=await this.readDetailFrame(ids);
-      if(earlyPostback)throw saveFailure('CpiEarlyPostbackError','Postback CPI observado antes do salvamento; formulário não enviado pelo agente.');
+      if(frameReloaded)throw reloaded();
       if(!current||current.frame!==frame||current.raw.cpfText.replace(/\D/g,'')!==checked.cpf){
         throw saveFailure('CpiIdentityChangedError','Identidade CPI mudou durante o preenchimento.');
       }
     };
-    // Localizar selects pela linha de rótulo; nunca assumir índice global ou valor HTML desconhecido.
-    const selectFor = async (name: RegExp) => {
-      const selects = frame.locator('select');
-      const matched: Array<import('playwright-core').Locator> = [];
-      for (let i = 0, n = await selects.count(); i < n; i++) {
-        const element = selects.nth(i);
-        const label = await element.evaluate(select => {
-          const row = select.closest('.row');
-          const cell = row?.querySelector('.cell');
-          return cell?.textContent?.trim() ?? '';
-        }).catch(() => '');
-        if (name.test(label.normalize('NFD').replace(/[\u0300-\u036f]/g, ''))) matched.push(element);
-      }
-      if (matched.length !== 1) throw saveFailure('CpiFormFieldError','Campo obrigatório da CPI não identificado de maneira única.');
-      return matched[0];
+    const single=async(selector:string,name:SaveFailure,message:string)=>{
+      const located=frame.locator(selector);
+      if(await located.count()!==1)throw saveFailure(name,message);
+      return located;
     };
-    const source = await selectFor(/Pesquisador\/Fonte\s*:/i);
-    await assertIdentity();
-    throwIfAborted(signal, 'cpi_fill');
-    await source.selectOption({ label: 'Desk Data' }, { timeout: 10000 });
-    await assertIdentity();
-    const status = await selectFor(/^Status\s*:/i);
-    await assertIdentity();
-    throwIfAborted(signal, 'cpi_fill');
-    await status.selectOption({ label: 'Respondida' }, { timeout: 10000 });
-    // O portal exibe controles de resultado após a alteração do status.
-    const resultName = classification === 'restrictions' ? 'Sim, Consta Restrições' : 'Há Informações';
-    const radioDeadline = Date.now() + 12000;
-    let selected = false;
-    while (Date.now() < radioDeadline && !selected) {
-      throwIfAborted(signal, 'cpi_fill');
+    // Passo 3: Fonte e Fonte 1º = Desk Data; Status = Respondida (change_status revela resultado, editor e arquivo).
+    for(const name of ['id_pesquisador','id_pesquisador_prim']){
+      const select=await single(`select[name="${name}"]`,'CpiFormFieldError','Campo Pesquisador/Fonte da CPI não identificado de maneira única.');
       await assertIdentity();
-      selected = await frame.locator('input[type="radio"]').evaluateAll((nodes, requested) => {
-        const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toUpperCase();
-        const target = norm(requested);
-        const candidates = nodes.filter(node => {
-          const input = node as HTMLInputElement;
-          const row = input.closest('.row');
-          if (!row || !/RESULTADO\s*:/i.test(norm(row.textContent ?? ''))) return false;
-          const labelled = input.labels?.[0]?.textContent ?? input.closest('label')?.textContent ?? '';
-          let near = '';
-          let sibling: ChildNode | null = input.nextSibling;
-          // Alguns formulários antigos usam texto solto após cada radio, sem <label>.
-          for (let i = 0; sibling && i < 5; i++, sibling = sibling.nextSibling) {
-            if (sibling.nodeType === Node.ELEMENT_NODE &&
-                (sibling as Element).matches('input[type="radio"]')) break;
-            near += sibling.textContent ?? '';
-            if (norm(near) === target) break;
-          }
-          const nextLabel = input.nextElementSibling?.textContent ?? '';
-          return [labelled, near, nextLabel].some(value => norm(value) === target);
-        }) as HTMLInputElement[];
-        if (candidates.length !== 1 || candidates[0].disabled) return false;
-        if (!candidates[0].checked) candidates[0].click();
-        return candidates[0].checked;
-      }, resultName).catch(() => false);
-      if (!selected) await page.waitForTimeout(250);
+      throwIfAborted(signal,'cpi_fill');
+      await select.selectOption({label:'Desk Data'},{timeout:10000});
     }
-    if (!selected) throw saveFailure('CpiResultRadioError','Resultado CPI não identificável; nenhum envio realizado.');
-    const files = frame.locator('input[type="file"]');
-    await files.first().waitFor({state:'attached',timeout:12000}).catch(() => {});
-    if (await files.count() !== 1) throw saveFailure('CpiFileInputError','Campo único de anexo PDF não confirmado na CPI.');
-    const accept = await files.getAttribute('accept');
-    if (accept && !/(?:pdf|\.pdf)/i.test(accept)) throw saveFailure('CpiFileInputError','O campo da CPI não permite PDF.');
-    // Conferir formulário e ação antes de fornecer o arquivo a handlers do portal.
-    const saveCandidates = frame.locator('a.button,button,input[type="submit"]');
-    const actions: Array<import('playwright-core').Locator> = [];
-    for (let i = 0, n = await saveCandidates.count(); i < n; i++) {
-      const candidate = saveCandidates.nth(i);
-      if ((await candidate.textContent().catch(() => '') ?? '').trim() === 'Alterar' ||
-          await candidate.getAttribute('value').catch(() => null) === 'Alterar') actions.push(candidate);
-    }
-    if (actions.length !== 1) throw saveFailure('CpiSaveButtonError','Botão Alterar CPI não identificado de maneira única.');
-    const form=await files.evaluate(input=>{
-      const form=(input as HTMLInputElement).form;
-      return form?{action:form.action,method:form.method}:null;
-    });
-    if(!form||form.method.toLowerCase()!=='post')throw saveFailure('CpiFormActionError','Formulário de envio CPI não confirmado.');
-    const actionUrl=new URL(form.action);
-    if(actionUrl.protocol!=='https:'||actionUrl.hostname!==CPI_HOST||
-      actionUrl.searchParams.getAll('id_sol').length!==1||actionUrl.searchParams.get('id_sol')!==ids.solicitacaoId||
-      actionUrl.searchParams.getAll('id_pesq_tipo').length!==1||actionUrl.searchParams.get('id_pesq_tipo')!==ids.pesquisaId){
-      throw saveFailure('CpiFormActionError','Ação do formulário CPI não corresponde aos IDs validados.');
-    }
-    actionUrl.hash='';
-    if(!await actions[0].evaluate(button=>button.closest('form')===document.querySelector('input[type="file"]')?.closest('form'))){
-      throw saveFailure('CpiFormActionError','Botão de salvamento e PDF pertencem a formulários diferentes.');
-    }
+    const status=await single('select[name="id_pesq_status"]','CpiFormFieldError','Campo Status da CPI não identificado de maneira única.');
     await assertIdentity();
+    throwIfAborted(signal,'cpi_fill');
+    await status.selectOption({label:'Respondida'},{timeout:10000});
+    const radio=frame.locator(classification==='restrictions'?'#consta3':'#consta2');
+    const files=frame.locator('#MainPage_FileUpload1');
+    try{
+      await radio.waitFor({state:'visible',timeout:12000});
+      await files.waitFor({state:'visible',timeout:12000});
+    }catch(error){
+      if(frameReloaded)throw reloaded();
+      throw saveFailure('CpiResultRadioError','Resultado ou anexo da CPI não apareceram após Status = Respondida; nenhum envio realizado.',error);
+    }
+    if(await radio.count()!==1||await radio.getAttribute('name')!=='consta')throw saveFailure('CpiResultRadioError','Resultado CPI não identificável; nenhum envio realizado.');
+    if(await files.count()!==1)throw saveFailure('CpiFileInputError','Campo único de anexo PDF não confirmado na CPI.');
+    const accept=await files.getAttribute('accept');
+    if(accept&&!/(?:pdf|\.pdf)/i.test(accept))throw saveFailure('CpiFileInputError','O campo da CPI não permite PDF.');
+    // "Alterar": link de texto único que chama upd_pesq() (sem id no portal).
+    const links=frame.locator('a');
+    const actions:Array<import('playwright-core').Locator>=[];
+    for(let i=0,n=await links.count();i<n;i++){
+      const link=links.nth(i);
+      if((await link.textContent().catch(()=>'')??'').trim()==='Alterar'&&/\bupd_pesq\s*\(\s*\)/.test(await link.getAttribute('onclick').catch(()=>null)??''))actions.push(link);
+    }
+    if(actions.length!==1)throw saveFailure('CpiSaveButtonError','Link Alterar da CPI não identificado de maneira única.');
+    const alterar=actions[0];
+    // Passo 4: marcar o resultado e conferir.
+    await assertIdentity();
+    throwIfAborted(signal,'cpi_fill');
+    await radio.check({timeout:5000});
+    if(!await radio.isChecked())throw saveFailure('CpiResultRadioError','Resultado CPI não ficou marcado; nenhum envio realizado.');
     progress.endStep?.('success');
+    // Passo 5: anexar e conferir o nome do arquivo no input (anexar não envia nada à CPI).
     beginStep('cpi_attach');
-    // Anexar só preenche o input local; nada é salvo na CPI até o clique em "Alterar".
-    // Um POST do portal disparado pelo anexo é tratado como postback precoce (revisão, sem reprocessar).
-    throwIfAborted(signal, 'cpi_attach');
+    throwIfAborted(signal,'cpi_attach');
     await files.setInputFiles(pdfPath);
-    const attached = await files.evaluate(input => {
-      const chosen = (input as HTMLInputElement).files;
-      return chosen?.length === 1 && /\.pdf$/i.test(chosen[0].name) && chosen[0].size > 100;
+    const expectedName=basename(pdfPath);
+    const chosen=await files.evaluate(input=>{
+      const list=(input as HTMLInputElement).files;
+      return list?.length===1?{name:list[0].name,size:list[0].size}:null;
     });
-    if (!attached) throw saveFailure('CpiAttachRejectedError','O formulário CPI não confirmou o anexo PDF.');
+    if(!chosen||chosen.name!==expectedName||chosen.size<100)throw saveFailure('CpiAttachRejectedError','O formulário CPI não confirmou o anexo do PDF esperado.');
+    // Passo 6: "Permanecer nesta tela" desmarcado (o modal precisa fechar depois de salvar).
+    const stay=frame.locator('#stay');
+    if(await stay.count()>1)throw saveFailure('CpiFormFieldError','Opção "Permanecer nesta tela" não identificada de maneira única.');
+    if(await stay.count()===1&&await stay.isChecked())await stay.uncheck({timeout:5000});
+    if(await stay.count()===1&&await stay.isChecked())throw saveFailure('CpiFormFieldError','Opção "Permanecer nesta tela" não pôde ser desmarcada.');
+    if(!await radio.isChecked())throw saveFailure('CpiResultRadioError','Resultado CPI desmarcado antes do envio.');
     await assertIdentity();
     progress.endStep?.('success');
     beginStep('cpi_save');
-    let approvedConfirm = false;
-    let httpSubmitted = false;
-    let armed=false;
-    let submittedRequest:Request|null=null;
-    let navigated=false;
-    let portalAlertFailure = false;
-    let portalHttpFailure = false;
-    const onRequest=(request:Request)=>{
-      try{
-        const url=new URL(request.url());url.hash='';
-        if(!armed||request.frame()!==frame||!request.isNavigationRequest())return;
-        // Outro documento (inclusive GET para a mesma URL) invalida a correlação.
-        if(submittedRequest||request.method()!=='POST'||url.href!==actionUrl.href)portalHttpFailure=true;
-        else submittedRequest=request;
-      }catch{/* Requisição sem frame não é evidência. */}
+    // Passo 7: a confirmação só é aceita com o texto do portal e o rótulo esperado; divergente é cancelada.
+    let approved=false;
+    let mismatch=false;
+    let portalAlert=false;
+    let sending=false;
+    const onDialog=(dialog:import('playwright-core').Dialog)=>{
+      const message=dialog.message().replace(/\s+/g,' ');
+      if(dialog.type()==='confirm'&&!approved&&!mismatch){
+        if(/Deseja Realmente Alterar esta Pesquisa/i.test(message)&&message.includes(`Resultado >>> ${label}`)){
+          approved=true;void dialog.accept().catch(()=>{});
+        }else{mismatch=true;void dialog.dismiss().catch(()=>{});}
+      }else if(dialog.type()==='alert'){
+        portalAlert=true;void dialog.accept().catch(()=>{});
+      }else void dialog.dismiss().catch(()=>{});
     };
-    const onNavigation=(changed:Frame)=>{
-      if(armed&&submittedRequest&&changed===frame){
-        if(navigated)portalHttpFailure=true;
-        navigated=true;
-      }
-    };
-    const onResponse = (response: import('playwright-core').Response) => {
-      try {
-        if (response.request()===submittedRequest) {
-          if (response.status() >= 200 && response.status() < 300) httpSubmitted = true;
-          else portalHttpFailure = true;
-        }
-      } catch { /* resposta não pertinente */ }
-    };
-    const onDialog = (dialog: import('playwright-core').Dialog) => {
-      if (dialog.type() === 'confirm' && /alterar esta pesquisa/i.test(dialog.message())) {
-        approvedConfirm = true;
-        void dialog.accept().catch(() => {});
-      } else if (dialog.type() === 'alert') {
-        if (/(?:erro|falha|inv[aá]lid|n[aã]o foi poss[ií]vel|n[aã]o autorizado)/i.test(dialog.message())) portalAlertFailure = true;
-        void dialog.accept().catch(() => {});
-      } else {
-        void dialog.dismiss().catch(() => {});
-      }
-    };
-    page.on('request',onRequest);
-    page.on('framenavigated',onNavigation);
-    page.on('response', onResponse);
-    page.on('dialog', onDialog);
+    page.on('dialog',onDialog);
     try {
-      throwIfAborted(signal, 'cpi_save');
+      throwIfAborted(signal,'cpi_save');
       await assertIdentity();
       // Checkpoint persistido ANTES do clique: daqui em diante qualquer falha é resultado incerto e nunca se repete.
       // Marcado antes de aguardar a gravação: um prazo estourado durante ela já devolve 'unverified'.
@@ -639,47 +583,53 @@ export class CpiBrowser {
       catch (error) {
         // Falha comprovada antes do clique (o corpo não segue): volta a ser "não enviado".
         effectsPossible=false;progress.effectsPossible=false;
-        throw saveFailure('CpiCheckpointError', 'Checkpoint de envio CPI não gravado; "Alterar" não foi clicado.', error);
+        throw saveFailure('CpiCheckpointError','Checkpoint de envio CPI não gravado; "Alterar" não foi clicado.',error);
       }
       // Operação expirada não clica em salvar (o chamador já devolveu resultado incerto).
       if (signal.aborted) return 'unverified';
-      armed=true;
-      await actions[0].evaluate((button,expectedAction) => {
-        const form=button.closest('form');
-        const action=form?new URL(form.action):null;
-        if(action)action.hash='';
-        if(!form||form.method.toLowerCase()!=='post'||action?.href!==expectedAction)throw new Error('Ação CPI alterada antes do clique.');
-        (button as HTMLElement).click();
-      },actionUrl.href);
+      // Passo 8: clicar, aceitar e aguardar o fechamento do modal (#sb-content).
+      await alterar.evaluate(link=>(link as HTMLElement).click());
+      const modal=page.locator('#sb-container');
       const deadline=Date.now()+confirmationTimeoutMs;
-      while(Date.now()<deadline) {
-        if (signal.aborted || portalAlertFailure || portalHttpFailure) return 'unverified';
-        const responseUrl=new URL(frame.url());responseUrl.hash='';
-        if (approvedConfirm && httpSubmitted && navigated && responseUrl.href===actionUrl.href) {
-          const evidence = await this.savedResponseEvidence(frame,ids, classification);
-          if (!signal.aborted && !portalHttpFailure && !portalAlertFailure && evidence && hasConfirmedSavedCpiResponse(evidence)) {
-            this.lastConfirmedSave = {...ids,frame};
+      while(Date.now()<deadline){
+        if(signal.aborted)return 'unverified';
+        // Cancelada a confirmação divergente, upd_pesq() não envia: revisão manual, sem verification_required.
+        if(mismatch&&!approved)return 'confirm_mismatch';
+        if(portalAlert)return 'unverified';
+        if(approved){
+          // "Carregando..." no link: envio em andamento (o link some quando o modal fecha).
+          if(!sending)sending=/Carregando/i.test(await alterar.textContent({timeout:300}).catch(()=>'')??'');
+          if(!await modal.isVisible().catch(()=>false)){
+            this.lastConfirmedSave={...ids,frame};
             saved=true;
-            return evidence.auxiliary404Observed ? 'confirmed_auxiliary_404' : 'confirmed';
+            return 'confirmed';
           }
         }
-        await page.waitForTimeout(300);
+        await page.waitForTimeout(250);
       }
       return 'unverified';
     } finally {
-      page.off('response', onResponse);
-      page.off('dialog', onDialog);
-      page.off('request',onRequest);
-      page.off('framenavigated',onNavigation);
+      page.off('dialog',onDialog);
     }
     } catch (error) {
-      failure=error;
+      // A recarga do iframe antes do clique é a causa: falhas seguintes (anexo, campos) são consequência dela.
+      failure=frameReloaded&&!effectsPossible&&!(error instanceof Error&&error.name==='CpiFrameReloadError')
+        ?saveFailure('CpiFrameReloadError','O formulário da pesquisa CPI foi recarregado antes do envio; nada foi salvo.',error):error;
       // Só a partir do checkpoint (clique possível) o resultado é incerto. Antes dele nada foi salvo pelo agente.
-      return effectsPossible?'unverified':earlyPostback?'not_submitted_postback':'not_submitted';
+      return effectsPossible?'unverified':'not_submitted';
     } finally {
-      if(watchedPage&&observeEarlyEffects)watchedPage.off('request',observeEarlyEffects);
+      if(watchedPage&&observeRequest)watchedPage.off('request',observeRequest);
+      if(watchedPage&&observeNavigation)watchedPage.off('framenavigated',observeNavigation);
       progress.endStep?.(saved?'success':'failed',failure);
     }
+  }
+  /** Registra só método e caminho (sem query string) de XHR/fetch do portal antes do clique. */
+  private reportPortalRequest(request:Request):void{
+    try{
+      const url=new URL(request.url());
+      if(url.hostname!==CPI_HOST)return;
+      this.diagnostics?.('cpi_portal_request',{method:request.method(),path:url.pathname});
+    }catch{/* URL inválida não é registrada. */}
   }
 
   async close(): Promise<void> {

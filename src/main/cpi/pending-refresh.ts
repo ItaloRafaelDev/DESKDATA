@@ -17,6 +17,17 @@ export function isPostSaveListingReady(
     row.solicitacaoId === completed.solicitacaoId);
 }
 
+/** Procura o checkbox da linha pelo value terminado em ";<solicitacaoId>;<pesquisaId>". Só um booleano cruza o navegador. */
+export async function listingHasRowCheckbox(page: Page, ids: CpiPendingRowId): Promise<boolean> {
+  const suffix = `;${ids.solicitacaoId};${ids.pesquisaId}`;
+  for (const frame of page.frames().filter(isCpiFrame)) {
+    const found = await frame.evaluate(expected => Array.from(document.querySelectorAll('input[type="checkbox"]'))
+      .some(input => (input as HTMLInputElement).value.endsWith(expected)), suffix).catch(() => false);
+    if (found === true) return true;
+  }
+  return false;
+}
+
 function isCpiFrame(frame: Frame): boolean {
   try { return new URL(frame.url()).hostname === CPI_HOST; } catch { return false; }
 }
@@ -64,7 +75,8 @@ export async function refreshPendingAfterConfirmedSave(
     const total = await readListingCount(page, 700, signal);
     if (total !== null) {
       const inspected = await inspectPendingPerson29Rows(page, total);
-      if (isPostSaveListingReady(total, inspected, completed)) {
+      // A linha também é localizada pelo checkbox #pesq_N (value "1;<solicitacaoId>;<pesquisaId>").
+      if (isPostSaveListingReady(total, inspected, completed) && !await listingHasRowCheckbox(page, completed)) {
         const signature = `${total}|${inspected.rows.map(row => `${row.pesquisaId}:${row.solicitacaoId}`).sort().join('|')}`;
         stableReads = signature === previousSignature ? stableReads + 1 : 1;
         previousSignature = signature;

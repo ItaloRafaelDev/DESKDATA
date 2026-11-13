@@ -12,7 +12,7 @@ import { NULL_TIMER, type StepTimer } from '../step-timing.ts';
 
 /** `not_submitted`: falha antes do clique em "Alterar"; item fica em `pdf_ready`, reprocessável com o mesmo PDF e sem POST. */
 export type CpiCycleOutcome = {state:'completed'|'verification_required'|'pending'|'review_required'|'not_submitted'; pesquisaId:string;solicitacaoId:string;message:string;warning?:'auxiliary_404';reviewReason?:JudicialIssueCode};
-export type CpiSaveOutcome = 'confirmed'|'confirmed_auxiliary_404'|'unverified'|'not_submitted'|'not_submitted_postback';
+export type CpiSaveOutcome = 'confirmed'|'confirmed_auxiliary_404'|'unverified'|'not_submitted'|'confirm_mismatch';
 export interface FullCycleServices {
   account:string;
   ids:CpiPendingRowId;
@@ -148,43 +148,42 @@ async function submit(s:FullCycleServices,pdf:string,classification:'restriction
   catch{
     // Exceção do adaptador: sem prova de que o clique não ocorreu, só o checkpoint decide.
     if(!checkpoint)confirmation='not_submitted';
-    else{
-      await s.mark('verification_required');
-      return outcome(s,'verification_required','Falha após o checkpoint de envio; resultado remoto incerto. Verificar manualmente, sem reenvio.');
-    }
+    else return unverified(s,'Falha após o checkpoint de envio; resultado remoto incerto. Verificar manualmente, sem reenvio.');
   }
-  if(confirmation==='not_submitted'||confirmation==='not_submitted_postback'){
-    if(checkpoint){
-      // Defesa: com o checkpoint gravado o clique pode ter ocorrido; nunca tratar como não enviado.
-      await s.mark('verification_required');
-      return outcome(s,'verification_required','Falha após o checkpoint de envio; resultado remoto incerto. Verificar manualmente, sem reenvio.');
-    }
-    const postback=confirmation==='not_submitted_postback';
-    // Postback do próprio portal antes do clique: nada salvo pelo agente, mas o formulário pode ter sido enviado
-    // pelo portal. Vai para revisão manual (nunca reprocessado automaticamente), sem verification_required.
-    if(postback)await s.mark('review_required');
-    try{await timer.step('cpi_close_unsaved',()=>s.closeUnsavedDetail());}
-    catch(error){throw new Error('Modal da pesquisa CPI não foi fechado; portal bloqueado. Feche o detalhe manualmente no Edge.',{cause:error});}
-    if(postback)return outcome(s,'review_required','O portal enviou o formulário antes do clique em Alterar; nada foi salvo pelo agente. Modal fechado sem salvar; conferir a pesquisa manualmente.');
+  if(confirmation==='not_submitted'){
+    // Defesa: com o checkpoint gravado o clique pode ter ocorrido; nunca tratar como não enviado.
+    if(checkpoint)return unverified(s,'Falha após o checkpoint de envio; resultado remoto incerto. Verificar manualmente, sem reenvio.');
+    await closeUnsaved(s,timer);
     return outcome(s,'not_submitted','Falha antes do clique em Alterar; nada foi salvo. Modal fechado sem salvar; a pesquisa será reprocessada com o mesmo PDF, sem nova consulta.');
   }
-  if(confirmation==='confirmed'||confirmation==='confirmed_auxiliary_404'){
-    // O envio remoto foi confirmado, mas a finalização local ainda pode falhar.
-    // Persistir uma pendência antes de fechar; nunca liberar reenvio ao retomar.
+  if(confirmation==='confirm_mismatch'){
+    // Confirmação cancelada: upd_pesq() não envia. O checkpoint já foi gravado, então só a revisão manual é possível.
     await s.mark('review_required');
-    try {
+    await closeUnsaved(s,timer);
+    return outcome(s,'review_required','Confirmação divergente do portal; cancelada sem enviar. Modal fechado sem salvar; conferir a pesquisa manualmente.');
+  }
+  if(confirmation==='confirmed'||confirmation==='confirmed_auxiliary_404'){
+    // Modal fechado após a confirmação aceita. A conclusão exige a listagem atualizada sem a pesquisa.
+    // O estado continua submit_started (bloqueante) até a conclusão: nunca libera reenvio.
+    try{
       await timer.step('cpi_close_detail',()=>s.closeCompletedDetail());
-      await s.mark('completed');
-    } catch {
-      // Falha no fechamento, atualização da listagem ou persistência da conclusão:
-      // manter a pendência visível e impedir segundo envio.
-      return outcome(s,'review_required','Resposta salva, mas o fechamento ou o registro da conclusão CPI não foi confirmado. Verificação manual necessária; não reenviar.');
+    }catch{
+      return unverified(s,'Resposta enviada sem confirmação: o modal não fechou ou a pesquisa continua na listagem aguardando. Verificar manualmente, sem reenvio.');
     }
+    await s.mark('completed');
     if(confirmation==='confirmed_auxiliary_404')return outcome(s,'completed',
       'Resposta CPI confirmada e janela fechada; erro 404 do recurso auxiliar cpi_api_request.aspx observado. Verificar a integracao externa.',
       'auxiliary_404');
-    return outcome(s,'completed','Resposta CPI confirmada, modal fechado e próxima solicitação liberada.');
+    return outcome(s,'completed','Resposta CPI confirmada: modal fechado e pesquisa fora da listagem; próxima solicitação liberada.');
   }
+  return unverified(s,'Envio sem confirmação: o modal não fechou no prazo após Alterar. Verificar manualmente, sem reenvio.');
+}
+async function unverified(s:FullCycleServices,message:string):Promise<CpiCycleOutcome>{
   await s.mark('verification_required');
-  return outcome(s,'verification_required','Envio efetuado sem confirmação suficiente; verificar manualmente, sem reenvio.');
+  return outcome(s,'verification_required',message);
+}
+/** Fecha o modal sem salvar; se não fechar, o portal fica bloqueado (parada sistêmica). */
+async function closeUnsaved(s:FullCycleServices,timer:Pick<StepTimer,'step'>):Promise<void>{
+  try{await timer.step('cpi_close_unsaved',()=>s.closeUnsavedDetail());}
+  catch(error){throw new Error('Modal da pesquisa CPI não foi fechado; portal bloqueado. Feche o detalhe manualmente no Edge.',{cause:error});}
 }

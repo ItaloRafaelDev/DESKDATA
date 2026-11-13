@@ -93,6 +93,8 @@ if(instanceLock)app.whenReady().then(()=>{
   const dataDir=app.getPath('userData');
   const logger=diagnostics=new DiagnosticLogger(join(dataDir,'logs'));
   void logger.write('app_started',{state:'success'}).catch(()=>{});
+  // Requisições XHR/fetch do portal antes do clique em "Alterar": só método e caminho (diagnostics filtra).
+  cpiBrowser.setDiagnostics((event,fields)=>{void logger.write(event,fields).catch(()=>{});});
   const store=history=new QueryHistoryStore(dataDir,protector);
   const reports=personReports=new PersonReportService({history:store,
     currentAccount:()=>sessionChanging(ctx)?null:sessionState.account,

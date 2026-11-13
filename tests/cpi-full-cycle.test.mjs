@@ -173,7 +173,7 @@ test('processo Criminal vira restrições; envio sem confirmação fica travado'
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 
-test('resposta persistida com falha no fechamento nao e reenviada e exige revisao',async()=>{
+test('resposta persistida com falha no fechamento nao e reenviada e exige verificacao (E6)',async()=>{
   const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-close-')));
   try{
     let uploads=0,closeCalls=0;
@@ -187,12 +187,12 @@ test('resposta persistida com falha no fechamento nao e reenviada e exige revisa
       closeCompletedDetail:async()=>{closeCalls++;throw Error('Shadowbox indisponivel');}
     });
     const result=await executeCpiPersonCycle(s);
-    assert.equal(result.state,'review_required');
+    assert.equal(result.state,'verification_required');
     assert.equal(uploads,1);assert.equal(closeCalls,1);
-    assert.ok(events.includes('review_required'));
+    assert.ok(events.includes('verification_required'));
     assert.equal(events.includes('completed'),false);
     const second=await executeCpiPersonCycle(s);
-    assert.equal(second.state,'review_required');
+    assert.equal(second.state,'review_required');// bloqueado: sem reenvio
     assert.equal(uploads,1);assert.equal(closeCalls,1);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
@@ -216,13 +216,13 @@ test('falha no fechamento persiste pendência após reinício e impede segundo e
       uploadAndSave:async()=>{uploads++;return 'confirmed';},
       closeCompletedDetail:async()=>{throw Error('Fechamento do modal indisponível');}
     });
-    assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
-    assert.equal((await store.get(account,ids)).stage,'review_required');
+    assert.equal((await executeCpiPersonCycle(s)).state,'verification_required');
+    assert.equal((await store.get(account,ids)).stage,'verification_required');
     assert.equal((await store.listPending(account,0,10)).total,1);
     store=new CpiWorkflowStore(dir,protector);
     s.getCpf=async()=>{throw Error('Não reabrir solicitação respondida');};
     assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
     assert.equal(uploads,1);
-    assert.equal((await store.get(account,ids)).stage,'review_required');
+    assert.equal((await store.get(account,ids)).stage,'verification_required');
   }finally{await rm(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
 });

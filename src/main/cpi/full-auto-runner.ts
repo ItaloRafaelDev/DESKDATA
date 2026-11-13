@@ -148,10 +148,10 @@ export class CpiFullAutoRunner {
             ?'CPI respondeu e anexou PDF, mas houve erro 404 em recurso auxiliar. Verifique a integracao externa.'
             :`Pesquisa ${outcome.pesquisaId}: ${outcome.message}`});
           if(outcome.state==='verification_required'){
-            // Envio incerto: o modal é mantido aberto para a verificação manual (nunca fechado em envio incerto),
-            // e com ele nenhum ciclo seguinte consegue ler a listagem. Pausa na hora, sem reenvio.
+            // Envio incerto (modal que não fecha ou pesquisa que continua na listagem): o modal nunca é fechado
+            // em envio incerto e a listagem não é confiável. Pausa na hora, sem reenvio.
             this.countFailure('submit_unverified');
-            this.halt(`Pesquisa ${outcome.pesquisaId}/${outcome.solicitacaoId}: envio sem confirmação. O detalhe foi mantido aberto para a verificação manual no Edge. Automacao pausada sem reenvio automatico.`);
+            this.halt(`Pesquisa ${outcome.pesquisaId}/${outcome.solicitacaoId}: ${outcome.message.replace(/[.\s]+$/,'')}. Automacao pausada sem reenvio automatico.`);
             return;
           }
           if(outcome.state==='not_submitted'){
