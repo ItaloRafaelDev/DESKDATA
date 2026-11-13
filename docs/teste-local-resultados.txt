@@ -1,0 +1,94 @@
+
+> deskdata-desktop@0.1.0 test
+> node --experimental-strip-types --test tests/*.test.mjs
+
+TAP version 13
+# (node:2663) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: autentica por POST /auth e consulta créditos sem expor credenciais nas URLs
+ok 1 - autentica por POST /auth e consulta créditos sem expor credenciais nas URLs
+  ---
+  duration_ms: 3.634387
+  type: 'test'
+  ...
+# Subtest: uma consulta lógica envia cinco datasets em somente um POST
+ok 2 - uma consulta lógica envia cinco datasets em somente um POST
+  ---
+  duration_ms: 0.932157
+  type: 'test'
+  ...
+# Subtest: HTTP 202 reutiliza query.code em GET, sem repetir POST de cobrança
+ok 3 - HTTP 202 reutiliza query.code em GET, sem repetir POST de cobrança
+  ---
+  duration_ms: 2.797242
+  type: 'test'
+  ...
+# (node:2664) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: CPF válido pode vir formatado
+ok 4 - CPF válido pode vir formatado
+  ---
+  duration_ms: 1.108581
+  type: 'test'
+  ...
+# Subtest: rejeita CPF com dígito verificador incorreto e sequências repetidas
+ok 5 - rejeita CPF com dígito verificador incorreto e sequências repetidas
+  ---
+  duration_ms: 0.203535
+  type: 'test'
+  ...
+# (node:2665) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: normaliza resposta completa e diferencia vazio de sucesso
+ok 6 - normaliza resposta completa e diferencia vazio de sucesso
+  ---
+  duration_ms: 0.802763
+  type: 'test'
+  ...
+# Subtest: não permite relatório com dataset omitido
+ok 7 - não permite relatório com dataset omitido
+  ---
+  duration_ms: 0.334812
+  type: 'test'
+  ...
+# Subtest: bloqueia dataset com erro interno
+ok 8 - bloqueia dataset com erro interno
+  ---
+  duration_ms: 0.194752
+  type: 'test'
+  ...
+# Subtest: rejeita código de resposta diferente de sucesso
+ok 9 - rejeita código de resposta diferente de sucesso
+  ---
+  duration_ms: 0.1131
+  type: 'test'
+  ...
+# (node:2696) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: esfera Criminal é classificada sem confundir processo Cível
+ok 10 - esfera Criminal é classificada sem confundir processo Cível
+  ---
+  duration_ms: 0.989933
+  type: 'test'
+  ...
+# Subtest: relatório destaca somente processo criminal e mantém todos os processos
+ok 11 - relatório destaca somente processo criminal e mantém todos os processos
+  ---
+  duration_ms: 15.75478
+  type: 'test'
+  ...
+# Subtest: campos JSON são escapados para impedir injeção de HTML
+ok 12 - campos JSON são escapados para impedir injeção de HTML
+  ---
+  duration_ms: 0.740369
+  type: 'test'
+  ...
+1..12
+# tests 12
+# suites 0
+# pass 12
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 264.464997
