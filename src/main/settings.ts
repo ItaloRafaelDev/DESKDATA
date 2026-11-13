@@ -18,9 +18,12 @@ export async function saveSettings(value:AppSettings):Promise<void>{
   await mkdir(dirname(settingsPath()),{recursive:true});
   await writeFile(settingsPath(),JSON.stringify({outputFolder:value.outputFolder,paidQueriesApproved:false},null,2),'utf8');
 }
-export async function chooseFolder():Promise<AppSettings>{
+/** Só o diálogo: espera humana, sem bloqueio exclusivo (E3/W25). `null` quando cancelado. */
+export async function pickOutputFolder():Promise<string|null>{
   const choice=await dialog.showOpenDialog({properties:['openDirectory','createDirectory'],title:'Selecionar pasta dos relatórios PDF'});
-  if(choice.canceled||!choice.filePaths[0])return getSettings();
-  const state=await getSettings();state.outputFolder=choice.filePaths[0];
+  return choice.canceled||!choice.filePaths[0]?null:choice.filePaths[0];
+}
+export async function saveOutputFolder(folder:string):Promise<AppSettings>{
+  const state=await getSettings();state.outputFolder=folder;
   await saveSettings(state);return state;
 }

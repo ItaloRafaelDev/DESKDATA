@@ -29,6 +29,9 @@ Todo texto exibido ao usuário, mensagens de erro e documentação ficam em **po
   ou `verification_required` / `review_required`. Leia o documento correspondente em `docs/` antes de alterar a CPI.
   O FULL AUTO (`full-auto-runner.ts`) roda enquanto houver pesquisas: `queue-selection.ts` nunca reabre itens finais
   ou em revisão; `failure-classes.ts` decide entre parada imediata (D1) e revisão do item (3 seguidas da mesma classe pausam).
+- **Prazos e cancelamento** (`deadline.ts`): toda espera externa tem prazo. As operações do `CpiBrowser` rodam em
+  `bounded()` (`CPI_OPERATION_TIMEOUTS`) e conferem o sinal (`throwIfAborted`) antes de cada efeito; `close()`
+  cancela. `DeskdataClient.reset()` aborta requisições e polling. Prazo estourado após efeito possível nunca repete.
 - **Criptografia:** `credentials.ts` abstrai o `safeStorage` (DPAPI) em `CredentialProtector`; os stores são testados
   com um protetor falso.
 - **Diagnóstico de tempo:** `step-timing.ts` mede etapas com um `correlationId` por ciclo; só nomes fixos de etapa

@@ -23,8 +23,9 @@ const RULES:[CpiFailureKind,RegExp][]=[
   ['storage',/fila cpi|protecao windows indisponivel/],
   ['account_changed',/conta deskdata alterada/],
   ['balance',/saldo|creditos insuficientes|autorize novas consultas|autorizacao deskdata/],
-  ['deskdata_session',/sessao (nao autenticada|expirada)|credenciais invalidas|entre novamente|acesso nao autorizado/],
-  ['cpi_session',/abra (primeiro|e autentique)|sessao cpi|dominio administrativo|redirecionamento inesperado/],
+  ['deskdata_session',/sessao (nao autenticada|expirada)|sessao deskdata encerrada|credenciais invalidas|entre novamente|acesso nao autorizado/],
+  // "Operação cancelada": o navegador CPI foi fechado (cpi:close, logout, encerramento) durante a etapa.
+  ['cpi_session',/abra (primeiro|e autentique)|sessao cpi|dominio administrativo|redirecionamento inesperado|operacao cancelada/],
   ['portal_layout',/reconhecid|controle esperado nao encontrado|controle de filtro|selecao do tipo|tipos cpi|tipo 29|total nao confirmado|listagem nao confirmad|identificadores da listagem|nao foi possivel vincular de maneira unica|nao identificado de maneira unica/],
   ['timeout',/tempo limite|timeout|excedeu/],
   ['network',/falha de rede|net::|econn|enotfound|fetch failed|servico deskdata indisponivel/],

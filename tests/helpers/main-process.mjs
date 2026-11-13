@@ -73,7 +73,12 @@ export async function withMainProcess(submitCpf,run,options={}){
     './pending-queries.ts':{PendingQueryMonitor:class {
       tasks=new Set();stopAll(){this.tasks.clear();}isWatching(id){return this.tasks.has(id);}watch(target){events.push('query_watch');this.tasks.add(target.id);}
     }},
-    './settings.ts':{getSettings:async()=>options.getSettings?options.getSettings(root):({outputFolder:root,paidQueriesApproved:false})},
+    './settings.ts':{getSettings:async()=>options.getSettings?options.getSettings(root):({outputFolder:root,paidQueriesApproved:false}),
+      pickOutputFolder:async()=>options.pickOutputFolder?options.pickOutputFolder(root):null,
+      saveOutputFolder:async folder=>{events.push('settings_saved');return {outputFolder:folder,paidQueriesApproved:false};}},
+    ...(options.dialogTimeoutMs?{'./dialog-guard.ts':{
+      DialogGuard:class extends localRequire('./dialog-guard.ts').DialogGuard {constructor(){super(options.dialogTimeoutMs);}}
+    }}:{}),
     ...(options.maintenance?{'./maintenance.ts':{MaintenanceService:class {
       async preview(){return {recordCount:0,pdfCount:0,pendingCount:0};}
       clean(selection){return options.maintenance(selection);}

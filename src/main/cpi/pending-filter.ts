@@ -1,4 +1,5 @@
 import type { Frame, Locator, Page } from 'playwright-core';
+import { throwIfAborted } from '../deadline.ts';
 
 /** Caminho observado na barra de endereços da CPI; não é endpoint de API. */
 export const CPI_PENDING_URL = 'https://adm.cpicentral.com.br/zpersEspecial/pesquisas/aguardando/mod_t_aguardando.aspx';
@@ -26,9 +27,10 @@ function isCpiFrame(frame: Frame): boolean {
   try { return new URL(frame.url()).hostname === CPI_HOST; } catch { return false; }
 }
 
-async function visibleControl(page: Page, selector: string, timeoutMs = 12000): Promise<{ frame: Frame; locator: Locator }> {
+async function visibleControl(page: Page, selector: string, timeoutMs = 12000, signal?: AbortSignal): Promise<{ frame: Frame; locator: Locator }> {
   const deadline = Date.now() + timeoutMs;
   do {
+    throwIfAborted(signal, 'cpi_filter');
     for (const frame of page.frames().filter(isCpiFrame)) {
       const locator = frame.locator(selector).first();
       try { if (await locator.isVisible()) return { frame, locator }; } catch { /* Frame pode navegar durante a inspeção. */ }
@@ -45,8 +47,9 @@ async function visibleControl(page: Page, selector: string, timeoutMs = 12000): 
  * disparando os handlers click/change do portal sem depender da posição na tela.
  * Nunca definir `checked` diretamente: isso ignoraria os handlers da CPI.
  */
-export async function setCpiFilterCheckbox(locator: Locator, desired: boolean): Promise<void> {
+export async function setCpiFilterCheckbox(locator: Locator, desired: boolean, signal?: AbortSignal): Promise<void> {
   if (await locator.isChecked() === desired) return;
+  throwIfAborted(signal, 'cpi_filter');
   const afterClick = await locator.evaluate((element, expected) => {
     const checkbox = element as HTMLInputElement;
     if (checkbox.tagName !== 'INPUT' || checkbox.type !== 'checkbox' || checkbox.disabled) {
@@ -60,9 +63,10 @@ export async function setCpiFilterCheckbox(locator: Locator, desired: boolean): 
   }
 }
 
-export async function readListingCount(page: Page, timeoutMs = 25000): Promise<number | null> {
+export async function readListingCount(page: Page, timeoutMs = 25000, signal?: AbortSignal): Promise<number | null> {
   const deadline = Date.now() + timeoutMs;
   do {
+    throwIfAborted(signal, 'cpi_listing');
     for (const frame of page.frames().filter(isCpiFrame)) {
       try {
         // Somente a frase do rodapé cruza a fronteira do navegador; linhas com CPF nunca são coletadas.
@@ -84,7 +88,7 @@ export async function readListingCount(page: Page, timeoutMs = 25000): Promise<n
  * Fase 2: altera apenas controles de FILTRO da listagem, sem abrir solicitações,
  * consultar CPFs ou modificar registros CPI. Exige login realizado manualmente.
  */
-export async function filterPendingPerson29(page: Page): Promise<CpiPendingFilterResult> {
+export async function filterPendingPerson29(page: Page, signal?: AbortSignal): Promise<CpiPendingFilterResult> {
   const current = new URL(page.url());
   if (current.hostname !== CPI_HOST) throw new Error('Navegador não está no domínio administrativo CPI.');
 
@@ -94,11 +98,12 @@ export async function filterPendingPerson29(page: Page): Promise<CpiPendingFilte
   if (new URL(page.url()).hostname !== CPI_HOST) throw new Error('Sessão CPI inválida ou redirecionamento inesperado.');
 
   // Botão observado no DOM: <i title="Filtros Avançados" ... onclick="set_tipo_pesq();">
-  const advanced = await visibleControl(page, '[title="Filtros Avançados"]');
+  const advanced = await visibleControl(page, '[title="Filtros Avançados"]', 12000, signal);
+  throwIfAborted(signal, 'cpi_filter');
   await advanced.locator.click({ timeout: 10000 });
 
   // Modal de tipos: pode estar em outro iframe CPI. Nunca depende de coordenadas nem de frame index.
-  const { frame, locator: type29 } = await visibleControl(page, 'input#id_tipo_pesq_29[type="checkbox"]');
+  const { frame, locator: type29 } = await visibleControl(page, 'input#id_tipo_pesq_29[type="checkbox"]', 12000, signal);
   const typeValue = await type29.getAttribute('value');
   if (!typeValue || typeValue.split(',')[0].trim() !== '29') {
     throw new Error('O checkbox identificado não corresponde ao tipo CPI 29.');
@@ -111,22 +116,24 @@ export async function filterPendingPerson29(page: Page): Promise<CpiPendingFilte
   for (let index = 0; index < length; index++) {
     const checkbox = options.nth(index);
     const id = await checkbox.getAttribute('id');
-    if (id !== 'id_tipo_pesq_29' && await checkbox.isChecked()) await setCpiFilterCheckbox(checkbox, false);
+    if (id !== 'id_tipo_pesq_29' && await checkbox.isChecked()) await setCpiFilterCheckbox(checkbox, false, signal);
   }
-  await setCpiFilterCheckbox(type29, true);
+  await setCpiFilterCheckbox(type29, true, signal);
   const checked = await options.evaluateAll(nodes => nodes.filter(node => (node as HTMLInputElement).checked).map(node => node.id));
   if (checked.length !== 1 || checked[0] !== 'id_tipo_pesq_29') {
     throw new Error('Não foi possível garantir a seleção exclusiva do tipo 29.');
   }
 
   // Botão confirmado no DOM: <a class="button" onclick="javascript:set();">Selecionar</a>.
+  throwIfAborted(signal, 'cpi_filter');
   await frame.getByRole('link', { name: 'Selecionar', exact: true }).click({ timeout: 10000 });
 
   // Botão confirmado no DOM: <i title="Mostrar Tudo" onclick="...texto_change(1,0);">
-  const showAll = await visibleControl(page, '[title="Mostrar Tudo"]', 15000);
+  const showAll = await visibleControl(page, '[title="Mostrar Tudo"]', 15000, signal);
+  throwIfAborted(signal, 'cpi_filter');
   await showAll.locator.click({ timeout: 15000 });
 
   // O retorno 0 é uma listagem vazia válida; ausência do rodapé não vira falso 0.
-  const total = await readListingCount(page);
+  const total = await readListingCount(page, 25000, signal);
   return { typeId: '29', total, state: total === null ? 'unconfirmed' : total === 0 ? 'empty' : 'found' };
 }
