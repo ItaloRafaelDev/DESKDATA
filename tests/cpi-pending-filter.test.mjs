@@ -91,7 +91,8 @@ async function withFilterPortal(modalOpen, run) {
       var Shadowbox={close:function(){window.manualCloses++;document.getElementById('sb-container').style.display='none';}};</script>
   ` }));
   const page = await context.newPage();
-  const driver = new CpiBrowser({ filter: 350, modalState: 200 });
+  // modalState de produção (fail-closed: estouro conta como modal aberto); filtro finito e maior que ele.
+  const driver = new CpiBrowser({ filter: 10_000 });
   driver.browser = browser; driver.page = page;
   try { await page.goto(CPI_PENDING_URL); await run({driver,page}); }
   finally { await context.close(); await browser.close(); }
@@ -103,7 +104,6 @@ test('CPI: Shadowbox aberta bloqueia o filtro sem clique; fechamento manual libe
   assert.match(error.message,/Pendência operacional CPI/);
   assert.equal(await page.evaluate(()=>window.advancedClicks),0,'o filtro não tenta clicar atrás do modal');
   await page.evaluate(()=>globalThis.Shadowbox.close());
-  driver.timeouts={...driver.timeouts,filter:5000};
   assert.deepEqual(await driver.filterPendingPerson29(),{typeId:'29',total:2,state:'found'});
   assert.deepEqual(await page.evaluate(()=>({manualCloses:globalThis.manualCloses,advancedClicks:globalThis.advancedClicks,
     showAllClicks:globalThis.showAllClicks})),
@@ -112,7 +112,6 @@ test('CPI: Shadowbox aberta bloqueia o filtro sem clique; fechamento manual libe
 }));
 
 test('CPI: listagem sem Shadowbox aplica o filtro 29 normalmente',()=>withFilterPortal(false,async({driver,page})=>{
-  driver.timeouts={...driver.timeouts,filter:5000};
   const steps=[];const timer={step:async(name,work)=>{steps.push(name);return work();}};
   assert.deepEqual(await driver.filterPendingPerson29(timer),{typeId:'29',total:2,state:'found'});
   assert.deepEqual(await page.evaluate(()=>({advancedClicks:globalThis.advancedClicks,showAllClicks:globalThis.showAllClicks})),
