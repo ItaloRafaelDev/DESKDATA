@@ -27,12 +27,11 @@ export function createZip(entries:ReadonlyArray<{name:string;data:Buffer}>):Buff
 }
 export class BackupService {
   private readonly options:{userData:string;backupDirectory:string;history:QueryHistoryStore;protector:CredentialProtector;getSettings:()=>Promise<AppSettings>};
-  private creating=false;
   constructor(options:{userData:string;backupDirectory:string;history:QueryHistoryStore;protector:CredentialProtector;getSettings:()=>Promise<AppSettings>}){this.options=options;}
   get directory():string{return this.options.backupDirectory;}
+  /** Reentrada impedida pelo OperationGate (canal exclusivo `backup:create`), sem flag local. */
   async create():Promise<{path:string;size:number;createdAt:string}>{
-    if(this.creating)throw Error('Já existe um backup em andamento.');this.creating=true;
-    try{
+    {
       if(!await this.options.protector.isAvailable())throw Error('Proteção de dados do Windows não está disponível. Backup cancelado.');
       const [snapshot,settings,records]=await Promise.all([this.options.history.backupSnapshot(),this.options.getSettings(),this.options.history.listAll()]);
       const key=await readFile(join(this.options.userData,'history-key.bin'));
@@ -60,6 +59,6 @@ export class BackupService {
       const file=join(this.directory,filename);const temp=`${file}.${randomUUID()}.tmp`;
       try{await writeFile(temp,data,{mode:0o600,flag:'wx'});await rename(temp,file);}catch(e){await unlink(temp).catch(()=>{});throw e;}
       return {path:file,size:data.length,createdAt};
-    }finally{this.creating=false;}
+    }
   }
 }

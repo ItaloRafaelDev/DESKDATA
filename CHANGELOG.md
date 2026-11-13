@@ -26,6 +26,7 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 - A fila CPI protegida é lida uma vez por varredura e mantida em cache na memória, invalidado quando o arquivo muda.
 - A escolha da pasta dos PDFs não bloqueia mais as outras operações enquanto o diálogo está aberto. Se a sessão mudar ou o aplicativo começar a encerrar, nada é gravado.
 - Sem resposta em 2 min, a confirmação da limpeza local fecha sozinha e vale "Cancelar". O mesmo acontece ao encerrar o aplicativo.
+- Concorrência unificada: uma única porta de operações (`OperationGate`) controla consultas, limpeza, troca de sessão, automação CPI e encerramento, no lugar das marcações espalhadas pelo processo principal. As recusas mantêm as mensagens de antes, e toda operação é liberada ao terminar, falhar ou ser cancelada.
 
 ### Corrigido
 - Testes CPI comparavam caminhos temporários não canônicos; falhavam no runner Windows (TEMP com nome 8.3).
@@ -38,6 +39,7 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 - Deskdata: sair da conta cancela a requisição e o polling em curso; a mensagem pede para não repetir a consulta. O polling por código tem prazo total de 3 min (no máximo 24 tentativas, só GET). Mesmo um transporte que ignore o cancelamento não passa do prazo da requisição.
 - Gravar o PDF ou conferir o PDF antes do anexo, numa pasta que não responde (ex.: unidade de rede), falha em 30 s. Nesse caso o caminho não é registrado e nada é anexado.
 - Parar o monitor CPI com uma leitura presa termina dentro do prazo do filtro.
+- Uma consulta recuperada em segundo plano podia trocar o PDF aberto por "Abrir PDF". O usuário podia então abrir o relatório de outra pessoa em vez do que estava na tela; agora a recuperação não altera esse PDF.
 
 ### Removido
 - Arquivos do pnpm (`pnpm-lock.yaml`, `pnpm-workspace.yaml`); o projeto usa somente npm.

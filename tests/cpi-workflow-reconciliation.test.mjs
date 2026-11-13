@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CpiWorkflowStore } from '../src/main/cpi/workflow-store.ts';
 import { reconcileCpiWorkflow } from '../src/main/cpi/workflow-reconciliation.ts';
-import { ApplicationOperations } from '../src/main/operations.ts';
+import { OperationGate as ApplicationOperations } from '../src/main/operation-gate.ts';
 
 const protector={isAvailable:async()=>true,encrypt:async text=>Buffer.from(text),decrypt:async buf=>({result:buf.toString()})};
 const ids={pesquisaId:'537987',solicitacaoId:'275064'};

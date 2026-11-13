@@ -18,9 +18,11 @@ Todo texto exibido ao usuário, mensagens de erro e documentação ficam em **po
 ### Arquitetura (pontos que não aparecem só lendo um arquivo)
 
 - **IPC:** todo canal é registrado por `bind()` em `src/main/index.ts`, que aplica `guard()` (só o frame principal
-  da janela principal), passa por `operations.ts` (operações exclusivas ou concorrentes, drenagem no encerramento)
-  e grava diagnóstico sanitizado. Canal novo usa `bind()`; se altera estado compartilhado, entra em `exclusiveChannels`.
-  `cpi:close` e `auth:logout` pausam o FULL AUTO e param o monitor antes de executar.
+  da janela principal), passa pelo `OperationGate` (`operation-gate.ts`) e grava diagnóstico sanitizado.
+  O gate é a única fonte de estado de concorrência: exclusiva com dono (`holder` = canal), segundo plano drenável,
+  chave contra reentrada e fases do encerramento. Não crie flags globais (`busy` e similares). Canal novo usa `bind()`;
+  se altera estado compartilhado, entra em `exclusiveChannels`. `cpi:close` e `auth:logout` pausam o FULL AUTO e param
+  o monitor no `bind()` antes de reservar a exclusiva.
 - **Preload** expõe o `DesktopApi` tipado (`src/shared/types.ts`) e é gerado como CJS (`index.cjs`).
 - **CPI** (`src/main/cpi`): `cpi-browser.ts` controla o Edge (`playwright-core`, login manual).
   `full-cycle.ts` (`executeCpiPersonCycle`) executa um item: reivindicar → consulta Deskdata → classificar

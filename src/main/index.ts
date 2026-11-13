@@ -40,11 +40,14 @@ import { AccountApprovalStore } from './account-approval.ts';
 import { QueryHistoryStore, assertQueryRecordIdentity, type QueryRecord } from './query-history.ts';
 import { PendingQueryMonitor, type PendingTarget } from './pending-queries.ts';
 import { MaintenanceService } from './maintenance.ts';
-import { ApplicationOperations, settleWithin } from './operations.ts';
+import { GATE_BUSY_MESSAGE, OperationGate, settleWithin } from './operation-gate.ts';
 import type { MaintenanceSelection, MaintenanceResult } from '../shared/types.ts';
 
 const client=new DeskdataClient();
-const operations=new ApplicationOperations();
+// Única fonte de estado de concorrência (E4): exclusividade, segundo plano, reentrada e encerramento.
+const gate=new OperationGate();
+const CPI_AUTO_HOLDER='cpi:auto',CPI_MONITOR_HOLDER='cpi:monitor';
+const SESSION_HOLDERS=['auth:login','auth:logout'];
 // A reserva acontece no wrapper IPC antes de invocar qualquer função assíncrona.
 const exclusiveChannels=new Set([
   'api:query','pis:query','company:query','queries:resume','history:recover-code',
@@ -54,10 +57,9 @@ const exclusiveChannels=new Set([
   'cpi:person:history','cpi:person:prepare','cpi:workflow:verify','cpi:close'
 ]);
 const dialogs=new DialogGuard();
-let folderDialogOpen=false;
 const cpiBrowser=new CpiBrowser();
 const cpiMonitor=new CpiPendingMonitor(
-  () => operations.run(()=>cpiBrowser.filterPendingPerson29(),true),
+  () => gate.run(()=>cpiBrowser.filterPendingPerson29(),{exclusive:true,holder:CPI_MONITOR_HOLDER}),
   snapshot => {
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
       mainWindow.webContents.send('cpi:monitor:updated', snapshot);
@@ -65,7 +67,6 @@ const cpiMonitor=new CpiPendingMonitor(
   }
 );
 let mainWindow:BrowserWindow;
-let busy=false;
 let lastSavedPdf:string|null=null;
 let history:QueryHistoryStore;
 let personReports:PersonReportService;
@@ -73,13 +74,10 @@ let monitor:PendingQueryMonitor;
 let maintenance:MaintenanceService;
 let backups:BackupService;
 let diagnostics:DiagnosticLogger;
-let maintenanceActive=false;
-let sessionTransitionActive=false;
 let approvals:AccountApprovalStore;
 let cpiWorkflow:CpiWorkflowStore;
 let cpiAuto:CpiFullAutoRunner;
 const cpiQueue=new CpiQueueSelector();
-const activeCompletions=new Set<Promise<void>>();
 let sessionAccount:string|null=null;
 let lastCompanyResponse:{cnpj:string;payload:unknown;queryCode?:string}|null=null;
 let lastPisResponse:{cpf:string;payload:unknown;queryCode?:string}|null=null;
@@ -104,9 +102,8 @@ function cpiScanOne(context:CpiScanContext):Promise<CpiScanResult>{
  */
 async function cpiScanOneTimed(timer:StepTimer,context:CpiScanContext):Promise<CpiScanResult>{
   const who=account();
-  if(busy||maintenanceActive||sessionTransitionActive)throw new Error('Outra operação está em andamento.');
-  busy=true;
-  try {
+  // Exclusividade garantida pelo gate (holder 'cpi:auto'); nenhuma flag local.
+  {
     const settings=await getSettings();
     if(!settings.outputFolder)throw new Error('Configure uma pasta de PDFs antes da automação CPI.');
     let filtered: Awaited<ReturnType<CpiBrowser['filterPendingPerson29']>>;
@@ -143,7 +140,7 @@ async function cpiScanOneTimed(timer:StepTimer,context:CpiScanContext):Promise<C
     if(result.state==='pending')cpiQueue.defer(target);else cpiQueue.release(target);
     if(sessionAccount!==who)throw new Error('Conta Deskdata alterada durante o processamento CPI.');
     return {kind:'item',found,outcome:result};
-  }finally{busy=false;}
+  }
 }
 /** Marca o item como revisão manual quando ainda não está em estágio final (submit_started permanece como está). */
 async function sendCpiItemToReview(who:string,ids:CpiPendingRowId):Promise<void>{
@@ -196,16 +193,16 @@ function bind<T extends unknown[]>(channel:string,operation:(...args:T)=>Promise
     try {
       const stoppingCpi=channel==='cpi:close'||channel==='auth:logout';
       if(stoppingCpi){
-        operations.assertAccepting();
-        if(channel==='auth:logout'&&(maintenanceActive||sessionTransitionActive||(busy&&!cpiAuto.isActive())))
-          throw new Error('Conclua a operação atual antes de encerrar a sessão.');
-        if(operations.isExclusive()&&!cpiAuto.isActive()&&!cpiMonitor.isActive())
-          throw new Error('Outra operação está em andamento. Conclua a operação atual.');
+        gate.assertAccepting();
+        // Só trabalho CPI em segundo plano (agente ou monitor) pode ser aguardado; qualquer outra exclusiva recusa.
+        if(gate.isExclusive()&&!gate.heldBy(CPI_AUTO_HOLDER,CPI_MONITOR_HOLDER)&&!cpiAuto.isActive()&&!cpiMonitor.isActive())
+          throw new Error(channel==='auth:logout'?'Conclua a operação atual antes de encerrar a sessão.':GATE_BUSY_MESSAGE);
       }
       const work=()=>operation(...(args as T));
+      // A pausa do agente e do monitor acontece só aqui (C10), antes de reservar a exclusiva.
       const result=stoppingCpi
-        ? await operations.runExclusiveAfter(()=>Promise.all([cpiAuto.pause(),cpiMonitor.stopAndWait()]),work)
-        : await operations.run(work,exclusiveChannels.has(channel));
+        ? await gate.runExclusiveAfter(()=>Promise.all([cpiAuto.pause(),cpiMonitor.stopAndWait()]),work,channel)
+        : await gate.run(work,{exclusive:exclusiveChannels.has(channel),holder:channel});
       void diagnostics?.write('ipc_success',{channel,durationMs:performance.now()-began}).catch(()=>{});
       return result;
     } catch(error){
@@ -214,24 +211,22 @@ function bind<T extends unknown[]>(channel:string,operation:(...args:T)=>Promise
     }
   });
 }
-function account():string {if(sessionTransitionActive)throw new Error('Troca de sessão em andamento.');if(!sessionAccount)throw new Error('Autentique-se antes de consultar o histórico.');return sessionAccount;}
+function sessionChanging():boolean {return gate.heldBy(...SESSION_HOLDERS);}
+function account():string {if(sessionChanging())throw new Error('Troca de sessão em andamento.');if(!sessionAccount)throw new Error('Autentique-se antes de consultar o histórico.');return sessionAccount;}
 async function approvedForCurrentAccount():Promise<boolean> {return approvals.isApproved(account());}
-async function viewSettings(){const settings=await getSettings();return {...settings,paidQueriesApproved:sessionAccount && !sessionTransitionActive?await approvals.isApproved(sessionAccount):false};}
+async function viewSettings(){const settings=await getSettings();return {...settings,paidQueriesApproved:sessionAccount && !sessionChanging()?await approvals.isApproved(sessionAccount):false};}
 async function assertPaidQueryApproved(){if(!await approvedForCurrentAccount())throw new Error('Autorize novas consultas para esta conta em Minha conta.');}
 function toError(e:unknown):Error { return e instanceof Error?e:new Error('Ocorreu um erro não identificado.'); }
-async function processReceived(received:ReceivedPersonQuery):Promise<QueryOutcome>{
+/** `remember=false` em recuperações de segundo plano: não trocam o "último PDF" que o usuário está vendo (C7). */
+async function processReceived(received:ReceivedPersonQuery,remember=true):Promise<QueryOutcome>{
   const result=await personReports.processReceived(received);
-  lastSavedPdf=result.path;
+  if(remember)lastSavedPdf=result.path;
   return result;
 }
 async function reprocessLastResponse(): Promise<QueryOutcome> {
-  if (busy) throw new Error('Já existe uma operação em execução.');
-  busy = true;
-  try {
-    const result=await personReports.reprocessLastResponse();
-    lastSavedPdf=result.path;
-    return result;
-  } finally { busy = false; }
+  const result=await personReports.reprocessLastResponse();
+  lastSavedPdf=result.path;
+  return result;
 }
 async function validateStoredPdf(path:string):Promise<boolean>{
   if(extname(path).toLowerCase()!=='.pdf')return false;
@@ -251,7 +246,7 @@ async function pending(record:QueryRecord,immediate=false):Promise<QueryExecutio
   if(!record.queryCode)throw new Error('Consulta sem código para recuperação automática.');
   if(!monitor.isWatching(record.id)){
     await history.setPending(record.id);
-    if(!shutdownRequested)monitor.watch(targetFrom(record),immediate);
+    if(!gate.isShuttingDown())monitor.watch(targetFrom(record),immediate);
   }
   return {state:'pending',recordId:record.id,queryCode:record.queryCode};
 }
@@ -270,9 +265,9 @@ async function resolveRecorded(record:QueryRecord,timer:StepTimer=NULL_TIMER):Pr
   const result:ReceivedPersonQuery={account:record.account,recordId:record.id,cpf:record.cpf,consultedAt:new Date().toISOString(),queryCode:code,payload:received.payload};
   return ready({...await timer.step('report_pdf',()=>processReceived(result)),reused:true});
 }
+/** Recuperação em segundo plano; o gate a rastreia (`background`) para drenagem na limpeza, troca de sessão e encerramento. */
 async function completePending(target:PendingTarget,payload:unknown):Promise<void>{
-  const work=(async()=>{
-    if(maintenanceActive) return;
+  if(gate.heldBy('maintenance:clean')) return;
   if(sessionAccount!==target.account)throw new Error('Sessão encerrada durante recuperação.');
   const current=await history.findById(target.account,target.id);
   if(!current || current.status==='ready')return;
@@ -284,17 +279,14 @@ async function completePending(target:PendingTarget,payload:unknown):Promise<voi
     if(!target.cpf)throw new Error('CPF ausente do histórico de consulta.');
     assertRecoveredCpf(payload,target.cpf);
     const received:ReceivedPersonQuery={account:target.account,recordId:target.id,cpf:target.cpf,consultedAt:new Date().toISOString(),queryCode:target.queryCode,payload};
-    await processReceived(received);
+    await processReceived(received,false);
   }
   showHistoryChange({kind:target.kind,recordId:target.id,state:'ready'});
-  })();
-  activeCompletions.add(work);
-  try{await work;}finally{activeCompletions.delete(work);}
 }
 async function resumeAfterAuthentication(who:string):Promise<void>{
   for(const kind of ['person','company'] as const){
     for(const row of await history.list(who,kind)){
-      if(!shutdownRequested && row.status==='pending' && row.queryCode)monitor.watch(targetFrom(row),true);
+      if(!gate.isShuttingDown() && row.status==='pending' && row.queryCode)monitor.watch(targetFrom(row),true);
     }
   }
 }
@@ -313,14 +305,11 @@ function queryAndSave(rawCpf:string):Promise<QueryExecution>{
 }
 async function queryAndSaveTimed(rawCpf:string,timer:StepTimer):Promise<QueryExecution>{
   if(cpiAuto?.isActive())throw new Error('Pause o ciclo CPI FULL AUTO antes de consultar manualmente.');
-  if(busy)throw new Error('Já existe uma operação em execução.');
   if(typeof rawCpf!=='string'||!isValidCpf(rawCpf))throw new Error('CPF inválido.');
   const cpf=cpfDigits(rawCpf);
   const settings=await getSettings();
   if(!settings.outputFolder)throw new Error('Configure a pasta de destino antes de consultar.');
   const who=account();
-  busy=true;
-  try {
     const previous=await history.findLatest(who,cpf);
     if(previous){
       const validPaths=[];
@@ -345,33 +334,24 @@ async function queryAndSaveTimed(rawCpf:string,timer:StepTimer):Promise<QueryExe
     if(outcome.state==='pending')return pending({...record,queryCode:outcome.queryCode});
     const received:ReceivedPersonQuery={account:who,recordId:record.id,cpf,consultedAt:new Date().toISOString(),queryCode:outcome.queryCode,payload:outcome.payload};
     return ready(await timer.step('report_pdf',()=>processReceived(received)));
-  }finally{busy=false;}
 }
 async function regenerateHistory(recordId:string):Promise<QueryExecution>{
-  if(busy)throw new Error('Já existe uma operação em execução.');
   const who=account();
   const record=await history.findById(who,recordId);
   if(!record || record.kind==='pis' || record.kind==='company')throw new Error('Consulta não encontrada no histórico de pessoas desta conta.');
   if(!record.queryCode)throw new Error('Esta consulta não possui código recuperável. Não será criado um novo POST.');
   if(!(await getSettings()).outputFolder)throw new Error('Configure a pasta para salvar o novo PDF.');
-  busy=true;
-  try {
     return resolveRecorded(record);
-  }finally{busy=false;}
 }
 async function recoverByCode(rawCpf:string,code:string):Promise<QueryExecution>{
-  if(busy)throw new Error('Já existe uma operação em execução.');
   if(!isValidCpf(rawCpf) || !/^Q-[A-F0-9]{10}$/.test(code))throw new Error('Informe CPF válido e código no formato Q-XXXXXXXXXX.');
   const cpf=cpfDigits(rawCpf);const who=account();
   if(!(await getSettings()).outputFolder)throw new Error('Configure a pasta de destino antes de recuperar.');
-  busy=true;
-  try {
     let record=await history.findLatest(who,cpf);
     if(record?.queryCode && record.queryCode!==code)throw new Error('Este CPF já está associado a outro código. Nenhuma requisição foi enviada.');
     if(!record)record=await history.begin(who,cpf);
     await history.setCode(record.id,code);
     return resolveRecorded({...record,queryCode:code});
-  }finally{busy=false;}
 }
 async function exportPis(cpf:string,payload:unknown,recordId:string,queryCode?:string):Promise<PisQueryExecution>{
   return resolvePisOutcome({
@@ -397,13 +377,11 @@ function queryPisAndSave(rawCpf:string):Promise<PisQueryExecution>{
 }
 async function queryPisAndSaveTimed(rawCpf:string,timer:StepTimer):Promise<PisQueryExecution>{
   if(cpiAuto?.isActive())throw new Error('Pause o ciclo CPI FULL AUTO antes de consultar manualmente.');
-  if(busy)throw new Error('Já existe uma operação em execução.');
   if(typeof rawCpf!=='string'||!isValidCpf(rawCpf))throw new Error('CPF inválido.');
   const cpf=cpfDigits(rawCpf);
   const settings=await getSettings();
   if(!settings.outputFolder)throw new Error('Selecione a pasta de destino antes de consultar.');
-  const who=account();busy=true;
-  try{
+  const who=account();
     const previous=await history.findLatest(who,cpf,'pis');
     if(previous){
       for(const path of [...previous.pdfPaths].reverse())if(await validateStoredPdf(path)){
@@ -434,19 +412,14 @@ async function queryPisAndSaveTimed(rawCpf:string,timer:StepTimer):Promise<PisQu
     const record=await history.begin(who,cpf,'pis');
     const result=await timer.step('deskdata_query',()=>client.queryBasicCpf(cpf,code=>history.setCode(record.id,code)));
     return timer.step('report_pdf',()=>exportPis(cpf,result.payload,record.id,result.queryCode));
-  }finally{busy=false;}
 }
 async function regeneratePis(recordId:string):Promise<PisQueryExecution>{
-  if(busy)throw new Error('Já existe uma operação em execução.');
   const row=await history.findById(account(),recordId);
   if(!row||row.kind!=='pis')throw new Error('Consulta PIS não encontrada.');
   if(!row.queryCode)throw new Error('Consulta sem código de recuperação disponível.');
-  busy=true;
-  try{
     const received=await client.fetchByCode(row.queryCode);
     assertRecoveredCpf(received.payload,row.cpf);
     return reusedPis(await exportPis(row.cpf,received.payload,row.id,row.queryCode));
-  }finally{busy=false;}
 }
 async function exportCompany(cnpj:string,payload:unknown,recordId:string,queryCode?:string):Promise<QueryOutcome>{
   const record=normalizeCompanyResponse(payload);
@@ -463,13 +436,11 @@ function queryCompanyAndSave(rawCnpj:string):Promise<QueryExecution>{
 }
 async function queryCompanyAndSaveTimed(rawCnpj:string,timer:StepTimer):Promise<QueryExecution>{
   if(cpiAuto?.isActive())throw new Error('Pause o ciclo CPI FULL AUTO antes de consultar manualmente.');
-  if(busy)throw new Error('Já existe uma operação em execução.');
   if(typeof rawCnpj!=='string'||!isValidCnpj(rawCnpj))throw new Error('CNPJ inválido.');
   const cnpj=cnpjDigits(rawCnpj);
   const settings=await getSettings();
   if(!settings.outputFolder)throw new Error('Configure a pasta de destino antes de consultar.');
-  const who=account();busy=true;
-  try{
+  const who=account();
     const previous=await history.findLatestCompany(who,cnpj);
     if(previous){
       for(const path of [...previous.pdfPaths].reverse()){
@@ -486,26 +457,17 @@ async function queryCompanyAndSaveTimed(rawCnpj:string,timer:StepTimer):Promise<
     const result=await timer.step('deskdata_query',()=>client.submitCompany(cnpj,code=>history.setCode(record.id,code)));
     if(result.state==='pending')return pending({...record,queryCode:result.queryCode});
     return ready(await timer.step('report_pdf',()=>exportCompany(cnpj,result.payload,record.id,result.queryCode)));
-  }finally{busy=false;}
 }
 async function regenerateCompany(recordId:string):Promise<QueryExecution>{
-  if(busy)throw new Error('Já existe uma operação em execução.');
   const record=await history.findById(account(),recordId);
   if(!record||record.kind!=='company'||!record.cnpj)throw new Error('Consulta empresarial não encontrada.');
   if(!record.queryCode)throw new Error('A consulta não possui código recuperável.');
-  busy=true;
-  try{
     return resolveRecorded(record);
-  }finally{busy=false;}
 }
 async function saveAgain():Promise<QueryOutcome>{
-  if(busy)throw new Error('Aguarde o término da operação atual.');
-  busy=true;
-  try{
     const result=await personReports.saveAgain();
     lastSavedPdf=result.path;
     return result;
-  }finally{busy=false;}
 }
 function createMainWindow():void{
   mainWindow=new BrowserWindow({
@@ -514,7 +476,7 @@ function createMainWindow():void{
   });
   mainWindow.once('ready-to-show',()=>mainWindow.show());
   mainWindow.on('close',event=>{
-    if(!shutdownReady){event.preventDefault();app.quit();}
+    if(!gate.isShutdownReady()){event.preventDefault();app.quit();}
   });
   mainWindow.webContents.setWindowOpenHandler(()=>({action:'deny'}));
   mainWindow.webContents.on('will-navigate',e=>e.preventDefault());
@@ -543,21 +505,21 @@ if(instanceLock)app.whenReady().then(()=>{
   const credentials = new CredentialStore(dataDir,protector);
   history = new QueryHistoryStore(dataDir,protector);
   personReports = new PersonReportService({history,
-    currentAccount:()=>sessionTransitionActive?null:sessionAccount,
+    currentAccount:()=>sessionChanging()?null:sessionAccount,
     getOutputFolder:async()=>(await getSettings()).outputFolder,
     savePdf:saveReportPdf});
   approvals = new AccountApprovalStore(dataDir,protector);
   cpiWorkflow = new CpiWorkflowStore(dataDir,protector);
-  cpiAuto = new CpiFullAutoRunner(context=>operations.run(()=>cpiScanOne(context),true),snapshot=>{
+  cpiAuto = new CpiFullAutoRunner(context=>gate.run(()=>cpiScanOne(context),{exclusive:true,holder:CPI_AUTO_HOLDER}),snapshot=>{
     if(mainWindow&&!mainWindow.isDestroyed()&&!mainWindow.webContents.isDestroyed())
       mainWindow.webContents.send('cpi:auto:updated',snapshot);
   });
   maintenance = new MaintenanceService(history);
   backups=new BackupService({userData:dataDir,backupDirectory:app.isPackaged?join(dataDir,'backups'):join(app.getAppPath(),'backups'),history,protector,getSettings});
   monitor = new PendingQueryMonitor({
-    get:code=>operations.run(()=>client.checkByCode(code)),
-    complete:(target,payload)=>operations.run(()=>completePending(target,payload)),
-    pause:(target,message)=>operations.run(async()=>{
+    get:code=>gate.run(()=>client.checkByCode(code)),
+    complete:(target,payload)=>gate.run(()=>completePending(target,payload),{background:true}),
+    pause:(target,message)=>gate.run(async()=>{
       if(sessionAccount!==target.account)return;
       await history.setPaused(target.id,message);
       showHistoryChange({kind:target.kind,recordId:target.id,state:'paused',message});
@@ -568,14 +530,12 @@ if(instanceLock)app.whenReady().then(()=>{
   // Fora do bloqueio exclusivo (W25): a espera humana não impede o FULL AUTO nem o encerramento.
   bind('settings:choose-folder',async()=>{
     const who=account();
-    if(folderDialogOpen)throw new Error('A seleção de pasta já está aberta.');
-    folderDialogOpen=true;
-    try{
+    await gate.run(async()=>{
       const chosen=await dialogs.untilShutdown(pickOutputFolder());
-      operations.assertAccepting();
+      gate.assertAccepting();
       if(account()!==who)throw new Error('A sessão mudou durante a seleção de pasta. Nada foi alterado.');
       if(chosen)await saveOutputFolder(chosen);
-    }finally{folderDialogOpen=false;}
+    },{key:'settings:choose-folder',busyMessage:'A seleção de pasta já está aberta.'});
     return viewSettings();
   });
   bind<[boolean]>('settings:approve',async approved=>{
@@ -587,11 +547,9 @@ if(instanceLock)app.whenReady().then(()=>{
   bind('maintenance:preview',async()=>{account();return maintenance.preview();});
   bind('backup:create',async()=>{
     account();
-    if(busy||maintenanceActive||sessionTransitionActive||cpiAuto.isActive())throw new Error('Pause a automação CPI antes de criar o backup.');
-    busy=true;
-    try{const result=await backups.create();
-      void diagnostics.write('backup_created',{state:'success'}).catch(()=>{});return result;
-    }finally{busy=false;}
+    if(cpiAuto.isActive())throw new Error('Pause a automação CPI antes de criar o backup.');
+    const result=await backups.create();
+    void diagnostics.write('backup_created',{state:'success'}).catch(()=>{});return result;
   });
   bind('diagnostics:open-folder',async()=>{
     account();
@@ -606,15 +564,13 @@ if(instanceLock)app.whenReady().then(()=>{
   });
   bind<[MaintenanceSelection]>('maintenance:clean',async(selection):Promise<MaintenanceResult>=>{
     account();
-    if(maintenanceActive||busy)throw new Error('Conclua a operação atual antes da limpeza.');
     if(cpiAuto.isActive()||cpiMonitor.isActive())throw new Error('Pause a automação CPI antes de executar a limpeza.');
     if(!selection||typeof selection.pdfs!=='boolean'||typeof selection.history!=='boolean'||(!selection.pdfs&&!selection.history))throw new Error('Selecione os dados a limpar.');
-    maintenanceActive=true;
-    busy=true;
+    // Holder 'maintenance:clean' no gate: recuperações em segundo plano são ignoradas até o fim da limpeza.
     monitor.stopAll();
     try{
       // Concluir recuperações aceitas antes de apresentar o resumo ou excluir arquivos.
-      await Promise.allSettled([...activeCompletions]);
+      await gate.drainBackground();
       const summary=await maintenance.preview();
       const explanation=[
         selection.pdfs?`${summary.pdfCount} PDF(s) cadastrados no histórico desta instalação serão removidos, quando existentes.`:'Os PDFs permanecerão no disco.',
@@ -627,7 +583,7 @@ if(instanceLock)app.whenReady().then(()=>{
         type:'warning',title:'Confirmar limpeza local',message:'Deseja excluir os dados selecionados?',detail:explanation,
         buttons:['Cancelar','Excluir definitivamente'],defaultId:0,cancelId:0,noLink:true,signal
       }),1);
-      operations.assertAccepting();
+      gate.assertAccepting();
       account();
       if(cpiAuto.isActive()||cpiMonitor.isActive())throw new Error('Pause a automação CPI antes de executar a limpeza.');
       if(!confirmed)return {cancelled:true,deletedPdfs:0,missingPdfs:0,deletedRecords:0};
@@ -636,8 +592,7 @@ if(instanceLock)app.whenReady().then(()=>{
       lastCompanyResponse=null;lastPisResponse=null;
       return {...result,cancelled:false};
     }finally{
-      maintenanceActive=false;busy=false;
-      if(!shutdownRequested && sessionAccount)await resumeAfterAuthentication(sessionAccount);
+      if(!gate.isShuttingDown() && sessionAccount)await resumeAfterAuthentication(sessionAccount);
     }
   });
   bind('cpi:history:list',async()=>{
@@ -674,7 +629,7 @@ if(instanceLock)app.whenReady().then(()=>{
   bind<[CpiPendingRowId]>('cpi:workflow:verify',async ids=>{
     const who=account();
     if(!validateCpiRowId(ids))throw new Error('Identificadores CPI inválidos.');
-    if(cpiAuto.isActive()||cpiMonitor.isActive()||busy||maintenanceActive)
+    if(cpiAuto.isActive()||cpiMonitor.isActive())
       throw new Error('Pause o agente e o monitor CPI antes de verificar uma pesquisa.');
     const result=await reconcileCpiWorkflow({store:cpiWorkflow,account:who,ids,
       checkLocal:async job=>{
@@ -712,12 +667,12 @@ if(instanceLock)app.whenReady().then(()=>{
   bind('cpi:auto:status',async()=>{account();return cpiAuto.status();});
   bind<[number]>('cpi:auto:start',async seconds=>{
     account();
-    if(cpiMonitor.isActive()||busy||maintenanceActive||operations.isExclusive())throw new Error('Pause o monitor e conclua a operação atual antes de iniciar FULL AUTO.');
+    if(cpiMonitor.isActive()||gate.isExclusive())throw new Error('Pause o monitor e conclua a operação atual antes de iniciar FULL AUTO.');
     if(cpiBrowser.status().state!=='open')throw new Error('Autentique-se na CPI pelo Edge antes de iniciar.');
     if(!await approvals.isApproved(account()))throw new Error('Autorize consultas Deskdata para a conta em Minha conta.');
-    operations.assertAccepting();
+    gate.assertAccepting();
     account();
-    if(cpiMonitor.isActive()||busy||maintenanceActive||operations.isExclusive())throw new Error('Conclua a operação atual antes de iniciar FULL AUTO.');
+    if(cpiMonitor.isActive()||gate.isExclusive())throw new Error('Conclua a operação atual antes de iniciar FULL AUTO.');
     cpiQueue.reset();
     return cpiAuto.start(seconds);
   });
@@ -730,7 +685,7 @@ if(instanceLock)app.whenReady().then(()=>{
   bind<[CpiPendingRowId]>('cpi:details:inspect',async(ids)=>{account();if(cpiMonitor.isActive()||cpiAuto.isActive())throw new Error('Pause o monitor antes de abrir os detalhes.');if(!validateCpiRowId(ids))throw new Error('Identificadores CPI inválidos.');return cpiBrowser.inspectPendingPersonDetails(ids);});
   bind<[CpiPendingRowId]>('cpi:person:history',async(ids)=>{
     const accountId = account();
-    if(cpiMonitor.isActive() || cpiAuto.isActive() || busy || maintenanceActive)throw new Error('Pause o monitoramento e conclua as operações atuais.');
+    if(cpiMonitor.isActive() || cpiAuto.isActive())throw new Error('Pause o monitoramento e conclua as operações atuais.');
     if(!validateCpiRowId(ids))throw new Error('Identificadores CPI inválidos.');
     // Revalida o detalhe ativo antes de usar o CPF somente no processo principal.
     await cpiBrowser.inspectPendingPersonDetails(ids);
@@ -745,11 +700,10 @@ if(instanceLock)app.whenReady().then(()=>{
   });
   bind<[CpiPendingRowId]>('cpi:person:prepare',async(ids)=>{
     const accountId=account();
-    if(cpiMonitor.isActive() || cpiAuto.isActive() || busy || maintenanceActive)throw new Error('Pause o monitoramento e conclua as operacoes atuais.');
+    if(cpiMonitor.isActive() || cpiAuto.isActive())throw new Error('Pause o monitoramento e conclua as operacoes atuais.');
     if(!validateCpiRowId(ids))throw new Error('Identificadores CPI invalidos.');
-    // Bloqueio de concorrencia abrange leitura de CPF, historico e GET opcional.
-    busy=true;
-    try {
+    // A exclusiva do gate abrange leitura de CPF, historico e GET opcional.
+    {
       await cpiBrowser.inspectPendingPersonDetails(ids);
       const cpf=cpiBrowser.readValidatedCpf(ids);
       const {outputFolder}=await getSettings();
@@ -770,23 +724,23 @@ if(instanceLock)app.whenReady().then(()=>{
       });
       if(sessionAccount!==accountId)throw new Error('Sessao Deskdata alterada durante a preparacao.');
       return prepared;
-    } finally { busy=false; }
+    }
   });
-  bind<[number]>('cpi:monitor:start',async(intervalSeconds)=>{account();if(operations.isExclusive())throw new Error('Conclua a operação atual antes de iniciar o monitor.');if(cpiAuto.isActive())throw new Error('Pause o ciclo FULL AUTO primeiro.');if(cpiBrowser.status().state!=='open')throw new Error('Abra o Edge e autentique na CPI antes de iniciar o monitor.');return cpiMonitor.start(intervalSeconds);});
+  bind<[number]>('cpi:monitor:start',async(intervalSeconds)=>{account();if(gate.isExclusive())throw new Error('Conclua a operação atual antes de iniciar o monitor.');if(cpiAuto.isActive())throw new Error('Pause o ciclo FULL AUTO primeiro.');if(cpiBrowser.status().state!=='open')throw new Error('Abra o Edge e autentique na CPI antes de iniciar o monitor.');return cpiMonitor.start(intervalSeconds);});
   bind('cpi:monitor:pause',async()=>{account();return cpiMonitor.pause();});
   bind('cpi:monitor:status',async()=>{account();return cpiMonitor.status();});
-  bind('cpi:close',async()=>{account();await cpiAuto.pause();await cpiMonitor.stopAndWait();await cpiBrowser.close();});
+  // O agente e o monitor já foram pausados pelo bind antes da reserva (C10).
+  bind('cpi:close',async()=>{account();await cpiBrowser.close();});
   bind('credentials:status',()=>credentials.status());
   bind('credentials:load',()=>credentials.load());
   bind('credentials:forget',()=>credentials.clear());
   bind<[string,string,boolean]>('auth:login',async(username,password,remember)=>{
     if(typeof username!=='string'||typeof password!=='string'||typeof remember!=='boolean')throw new Error('Credenciais inválidas.');
-    if(busy||maintenanceActive||sessionTransitionActive)throw new Error('Conclua a operação atual antes de alterar a sessão.');
     if(sessionAccount)throw new Error('Encerre a sessão atual antes de autenticar outra conta.');
-    sessionTransitionActive=true;
+    // Holder 'auth:login' no gate: `account()` informa "troca de sessão" até o fim.
     try {
       monitor.stopAll();
-      await Promise.allSettled([...activeCompletions]);
+      await gate.drainBackground();
       await client.authenticate(username,password);
       sessionAccount=username.trim().toLowerCase();
       await resumeAfterAuthentication(sessionAccount);
@@ -797,19 +751,14 @@ if(instanceLock)app.whenReady().then(()=>{
       // Se o histórico não puder ser recuperado após /auth, não deixar sessão parcialmente iniciada.
       monitor.stopAll();client.reset();sessionAccount=null;
       throw error;
-    } finally {sessionTransitionActive=false;}
+    }
   });
+  // Holder 'auth:logout'; o agente e o monitor já foram pausados pelo bind antes da reserva (C10).
   bind('auth:logout',async()=>{
-    if(busy||maintenanceActive||sessionTransitionActive)throw new Error('Conclua a operação atual antes de encerrar a sessão.');
-    sessionTransitionActive=true;
-    try {
-      monitor.stopAll();
-      await Promise.allSettled([...activeCompletions]);
-      await cpiAuto.pause();
-      await cpiMonitor.stopAndWait();
-      await cpiBrowser.close();
-      client.reset();sessionAccount=null;lastCompanyResponse=null;lastSavedPdf=null;lastPisResponse=null;personReports.clear();
-    }finally{sessionTransitionActive=false;}
+    monitor.stopAll();
+    await gate.drainBackground();
+    await cpiBrowser.close();
+    client.reset();sessionAccount=null;lastCompanyResponse=null;lastSavedPdf=null;lastPisResponse=null;personReports.clear();
   });
   bind('api:credits',()=>client.credits());
   bind<[string]>('api:query',queryAndSave);
@@ -851,14 +800,11 @@ if(instanceLock)app.whenReady().then(()=>{
 }).catch(e=>{void diagnostics?.write('startup_error',{errorType:toError(e).name}).catch(()=>{});console.error('Falha na inicialização:',toError(e).name);app.quit();});
 // Antes de finalizar, aguarda as operações aceitas e libera o handle do SQLite.
 // Não apaga nem recria o banco. A marca de migração e a chave permanecem no disco.
-let shutdownRequested=false;
-let shutdownReady=false;
+// Fases do encerramento ficam no gate: open → closing → ready (ou blocked se o banco já começou a fechar).
 app.on('before-quit',event=>{
-  if(shutdownReady)return;
+  if(gate.isShutdownReady())return;
   event.preventDefault();
-  if(shutdownRequested)return;
-  shutdownRequested=true;
-  operations.stopAccepting();
+  if(!gate.requestShutdown())return;
   dialogs.cancelAll();
   monitor?.stopAll();
   // Interromper novos agendamentos agora, preservando o ciclo e a sessão em curso.
@@ -866,19 +812,18 @@ app.on('before-quit',event=>{
   const started=performance.now();
   let databaseCloseStarted=false;
   void (async()=>{
-    if(!await operations.waitForIdle(stopping))throw new Error('ShutdownTimeoutError');
-    await Promise.allSettled([...activeCompletions]);
+    if(!await gate.waitForIdle(stopping))throw new Error('ShutdownTimeoutError');
+    await gate.drainBackground();
     if(!await settleWithin(cpiBrowser.close(),60_000-(performance.now()-started)))throw new Error('ShutdownTimeoutError');
     databaseCloseStarted=true;
     await history?.close();
     client.reset();sessionAccount=null;personReports?.clear();
-    shutdownReady=true;
+    gate.markShutdownReady();
     app.quit();
   })().catch(error=>{
     // Não registrar payloads, tokens ou identificadores nos diagnósticos.
     console.error('Falha ao encerrar o histórico SQLite:',toError(error).name);
-    shutdownRequested=false;
-    if(!databaseCloseStarted)operations.resumeAccepting();
+    gate.shutdownFailed(databaseCloseStarted);
     if(mainWindow&&!mainWindow.isDestroyed()){
       void dialog.showMessageBox(mainWindow,{type:'warning',title:'Encerramento adiado',
         message:'O aplicativo permanece aberto para preservar as operações e o histórico.',

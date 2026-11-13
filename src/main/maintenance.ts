@@ -14,7 +14,6 @@ function managedFile(path:string):boolean{
 
 /** Exclusão local explícita; nunca varre a pasta arbitrária escolhida pelo usuário. */
 export class MaintenanceService {
-  private cleaning=false;
   private readonly history:QueryHistoryStore;
   constructor(history:QueryHistoryStore){this.history=history;}
   async preview():Promise<MaintenancePreview>{
@@ -22,11 +21,10 @@ export class MaintenanceService {
     const files=new Set(rows.flatMap(record=>record.pdfPaths));
     return {recordCount:rows.length,pdfCount:files.size,pendingCount:rows.filter(r=>r.status==='pending'||r.status==='uncertain').length};
   }
+  /** Reentrada impedida pelo OperationGate (canal exclusivo `maintenance:clean`), sem flag local. */
   async clean(selection:MaintenanceSelection):Promise<MaintenanceResult>{
     if(!selection || typeof selection.pdfs!=='boolean'||typeof selection.history!=='boolean' || (!selection.pdfs&&!selection.history))throw new Error('Selecione ao menos uma opção de limpeza.');
-    if(this.cleaning)throw new Error('Uma limpeza já está em andamento.');
-    this.cleaning=true;
-    try{
+    {
       const rows=await this.history.listAll();
       const paths=[...new Set(rows.flatMap(record=>record.pdfPaths))];
       if(selection.pdfs && paths.some(file=>!managedFile(file)))throw new Error('O histórico contém um caminho de PDF não reconhecido. A limpeza foi interrompida antes de apagar qualquer arquivo.');
@@ -54,6 +52,6 @@ export class MaintenanceService {
       if(selection.history)await this.history.clearAll();
       else if(selection.pdfs)await this.history.removePdfReferences(cleared);
       return {deletedPdfs,missingPdfs,deletedRecords:selection.history?rows.length:0};
-    }finally{this.cleaning=false;}
+    }
   }
 }
