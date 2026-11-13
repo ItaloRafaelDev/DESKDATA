@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { CredentialProtector } from '../credentials.ts';
 import { validateCpiRowId, type CpiPendingRowId } from './pending-rows.ts';
@@ -21,8 +21,6 @@ export interface CpiWorkItem extends CpiPendingRowId {
   updatedAt: string;
 }
 type Stored = { version:1; items:CpiWorkItem[] };
-const MAX_WORK_ITEMS=10000;
-const CAPACITY_ERROR='Fila CPI atingiu o limite operacional de 10.000 registros; processamento bloqueado sem alterar o histórico.';
 const stages = new Set<CpiWorkStage>(['claimed','query_started','query_pending','pdf_ready','submit_started','completed','verification_required','review_required']);
 const verificationReasons=new Set<CpiVerificationReason>(['confirmed','remote_unverified','remote_unavailable','local_incomplete']);
 const validDate=(value:unknown):value is string=>typeof value==='string'&&!Number.isNaN(Date.parse(value));
@@ -52,16 +50,34 @@ function validStored(value:unknown):value is Stored {
   }
   return true;
 }
+/** Assinatura do arquivo cifrado: o cache só vale enquanto tamanho e mtime não mudam. */
+type FileSignature = { size:number; mtimeMs:number };
+const sameFile=(a:FileSignature,b:FileSignature):boolean=>a.size===b.size&&a.mtimeMs===b.mtimeMs;
+/**
+ * Sem teto de quantidade (D1). O conteúdo decifrado e validado fica em cache na memória do processo
+ * principal, invalidado quando o arquivo muda; cada leitura devolve uma cópia (nunca a referência do cache).
+ */
 export class CpiWorkflowStore {
   private queue:Promise<void>=Promise.resolve();
+  private cache:{signature:FileSignature;data:Stored}|null=null;
   private readonly path:string;
   private readonly directory:string;
   private readonly protector:CredentialProtector;
   constructor(directory:string,protector:CredentialProtector){this.directory=directory;this.protector=protector;this.path=join(directory,'cpi-workflows.bin');}
+  private async signature():Promise<FileSignature|null>{
+    try{const info=await stat(this.path);return {size:info.size,mtimeMs:info.mtimeMs};}
+    catch(error){
+      if((error as NodeJS.ErrnoException).code==='ENOENT')return null;
+      throw new Error('Fila CPI indisponível; processamento bloqueado.',{cause:error});
+    }
+  }
   private async read():Promise<Stored>{
+    const before=await this.signature();
+    if(!before){this.cache=null;return {version:1,items:[]};}
+    if(this.cache&&sameFile(this.cache.signature,before))return structuredClone(this.cache.data);
     let cipher:Buffer;
     try {cipher=await readFile(this.path);}catch(error){
-      if((error as NodeJS.ErrnoException).code==='ENOENT')return {version:1,items:[]};
+      if((error as NodeJS.ErrnoException).code==='ENOENT'){this.cache=null;return {version:1,items:[]};}
       throw new Error('Fila CPI indisponível; processamento bloqueado.',{cause:error});
     }
     if(!await this.protector.isAvailable())throw new Error('Proteção Windows indisponível; fila CPI bloqueada.');
@@ -69,18 +85,22 @@ export class CpiWorkflowStore {
     try {parsed=JSON.parse((await this.protector.decrypt(cipher)).result);}
     catch {throw new Error('Fila CPI corrompida; processamento bloqueado para evitar duplicação.');}
     if(!validStored(parsed))throw new Error('Fila CPI corrompida; processamento bloqueado para evitar duplicação.');
-    if(parsed.items.length>MAX_WORK_ITEMS)throw new Error(CAPACITY_ERROR);
+    // Só reaproveita se o arquivo não mudou entre o stat e a leitura; caso contrário, relê na próxima chamada.
+    const after=await this.signature();
+    this.cache=after&&sameFile(before,after)&&after.size===cipher.length?{signature:after,data:structuredClone(parsed)}:null;
     return parsed;
   }
   private async write(data:Stored):Promise<void>{
     if(!validStored(data))throw new Error('Tentativa de persistir fila CPI inválida.');
-    if(data.items.length>MAX_WORK_ITEMS)throw new Error(CAPACITY_ERROR);
     if(!await this.protector.isAvailable())throw new Error('Proteção Windows indisponível; fila CPI bloqueada.');
+    this.cache=null;
     const cipher=await this.protector.encrypt(JSON.stringify(data));
     await mkdir(this.directory,{recursive:true});
     const temporary=join(this.directory,`cpi-workflows-${randomUUID()}.tmp`);
     try{await writeFile(temporary,cipher,{flag:'wx',mode:0o600});await rename(temporary,this.path);}
     catch{await unlink(temporary).catch(()=>{});throw new Error('Falha ao persistir a fila CPI. Operação bloqueada.');}
+    const written=await this.signature().catch(()=>null);
+    if(written&&written.size===cipher.length)this.cache={signature:written,data:structuredClone(data)};
   }
   private locked<T>(job:()=>Promise<T>):Promise<T>{
     const action=this.queue.then(job);
@@ -110,6 +130,13 @@ export class CpiWorkflowStore {
     if(!validateCpiRowId(ids)||!account.trim())throw new Error('Identificação CPI inválida.');
     await this.queue;
     return (await this.read()).items.find(row=>key(row.account,row)===key(account,ids))??null;
+  }
+  /** Estágios de várias linhas com uma única leitura da fila (seleção do FULL AUTO). */
+  async stages(account:string,rows:readonly CpiPendingRowId[]):Promise<(CpiWorkStage|undefined)[]>{
+    if(typeof account!=='string'||!account.trim()||!rows.every(ids=>validateCpiRowId(ids)))throw new Error('Identificação CPI inválida.');
+    await this.queue;
+    const byKey=new Map((await this.read()).items.map(row=>[key(row.account,row),row.stage]));
+    return rows.map(ids=>byKey.get(key(account,ids)));
   }
   async claim(account:string,ids:CpiPendingRowId):Promise<CpiWorkItem>{
     if(!validateCpiRowId(ids)||!account.trim())throw new Error('Identificação CPI inválida.');

@@ -180,6 +180,14 @@ test('CPI 3B acao real: duplicidade de acoes impede mapeamento automatico', asyn
   assert.deepEqual(result.rows,[]);
 });
 
+test('E2: sem teto local de 100 linhas; 150 linhas válidas são mapeadas em ordem', async () => {
+  const actions = Array.from({length:150}, (_, i) => actionRow(String(700000 + i), String(400000 + i)));
+  const result = await inspectPendingPerson29Rows(pageFor(null, [], actions), 150);
+  assert.equal(result.state,'mapped');
+  assert.equal(result.rows.length,150);
+  assert.deepEqual(result.rows[149],{pesquisaId:'700149',solicitacaoId:'400149'});
+});
+
 test('CPI 3B acao real: multiplas linhas validas preservam ordem e IDs distintos', async () => {
   const result = await inspectPendingPerson29Rows(pageFor(null, [], [
     actionRow('642318','384527'), actionRow('642319','384528')

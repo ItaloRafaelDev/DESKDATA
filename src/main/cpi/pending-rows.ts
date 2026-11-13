@@ -24,8 +24,8 @@ interface FrameRowsResult {
   actionButtons: number;
 }
 
+// Sem teto local de linhas (D1): vale o que a página da CPI exibe, limitado pelo total confirmado no rodapé.
 const CPI_HOST = 'adm.cpicentral.com.br';
-const MAX_VISIBLE_ROWS = 100;
 
 export function isCpiNumericIdentifier(value: string): boolean {
   return /^[1-9]\d{3,11}$/.test(value.trim());
@@ -114,10 +114,6 @@ export async function inspectPendingPerson29Rows(page: Page, expectedTotal: numb
               results.uncertainRows++;
               continue;
             }
-            if (results.rows.length >= 100) {
-              results.uncertainRows++;
-              continue;
-            }
             seen.add(key);
             results.rows.push({ pesquisaId: pesq, solicitacaoId: sol });
           }
@@ -159,7 +155,7 @@ export async function inspectPendingPerson29Rows(page: Page, expectedTotal: numb
             const solicitacaoId = id(cellText(cells[solicitacaoIndex]));
             if (!pesquisaId || !solicitacaoId) { results.uncertainRows++; continue; }
             const key = `${pesquisaId}:${solicitacaoId}`;
-            if (!seen.has(key) && results.rows.length < 100) {
+            if (!seen.has(key)) {
               seen.add(key); results.rows.push({ pesquisaId, solicitacaoId });
             }
           }
@@ -179,7 +175,7 @@ export async function inspectPendingPerson29Rows(page: Page, expectedTotal: numb
   const selected = normalized.sort((a,b) => b.rows.length - a.rows.length)[0];
   const signatures = new Set(normalized.map(c => c.rows.map(row => `${row.pesquisaId}:${row.solicitacaoId}`).sort().join('|')));
   if (signatures.size !== 1 || selected.uncertainRows || selected.visibleRows !== selected.rows.length ||
-      selected.rows.length === 0 || selected.rows.length > MAX_VISIBLE_ROWS || selected.rows.length > expectedTotal ||
+      selected.rows.length === 0 || selected.rows.length > expectedTotal ||
       selected.rows.some(row => !validateCpiRowId(row))) {
     return { state: 'needs_mapping', total: expectedTotal, visibleRows: selected.visibleRows, rows: [], framesInspected,
       message: selected.actionButtons > 0

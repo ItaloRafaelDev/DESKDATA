@@ -11,7 +11,9 @@ import { validateCpiRowId } from './cpi/pending-rows.ts';
 import { CpiWorkflowStore } from './cpi/workflow-store.ts';
 import { reconcileCpiWorkflow } from './cpi/workflow-reconciliation.ts';
 import { findCpiPersonPdf } from './cpi/person-pdf.ts';
-import { CpiFullAutoRunner } from './cpi/full-auto-runner.ts';
+import { CpiFullAutoRunner, safeCpiCycleError, type CpiScanContext, type CpiScanResult } from './cpi/full-auto-runner.ts';
+import { classifyCpiError, CPI_IMMEDIATE_STOP } from './cpi/failure-classes.ts';
+import { CpiQueueSelector, CPI_FINAL_STAGES } from './cpi/queue-selection.ts';
 import { executeCpiPersonCycle } from './cpi/full-cycle.ts';
 import type { CpiPendingRowId, CpiPendingWorkflowStage } from '../shared/types.ts';
 import { DiagnosticLogger } from './diagnostics.ts';
@@ -73,6 +75,7 @@ let sessionTransitionActive=false;
 let approvals:AccountApprovalStore;
 let cpiWorkflow:CpiWorkflowStore;
 let cpiAuto:CpiFullAutoRunner;
+const cpiQueue=new CpiQueueSelector();
 const activeCompletions=new Set<Promise<void>>();
 let sessionAccount:string|null=null;
 let lastCompanyResponse:{cnpj:string;payload:unknown;queryCode?:string}|null=null;
@@ -88,12 +91,15 @@ async function timedCycle<T>(flow:TimedFlow,work:(timer:StepTimer)=>Promise<T>,o
   try{const result=await work(timer);timer.finish('success',outcome(result));return result;}
   catch(error){timer.finish('failed',undefined,error);throw error;}
 }
-type CpiScanResult={found:number;outcomes:import('./cpi/full-cycle.ts').CpiCycleOutcome[]};
-function cpiScanOne():Promise<CpiScanResult>{
-  return timedCycle('cpi',cpiScanOneTimed,result=>result.found===0?'empty':result.outcomes[0]?.state??'idle');
+function cpiScanOne(context:CpiScanContext):Promise<CpiScanResult>{
+  return timedCycle('cpi',timer=>cpiScanOneTimed(timer,context),
+    result=>result.kind==='idle'?(result.found===0?'empty':'idle'):result.kind==='item'?result.outcome.state:'item_failed');
 }
-/** Processa no máximo um item por varredura. O navegador não altera várias pesquisas de uma vez. */
-async function cpiScanOneTimed(timer:StepTimer):Promise<CpiScanResult>{
+/**
+ * Processa no máximo um item por varredura. O navegador não altera várias pesquisas de uma vez.
+ * Falha de item (não sistêmica) envia o item para revisão e devolve 'item_failed'; falha sistêmica é relançada.
+ */
+async function cpiScanOneTimed(timer:StepTimer,context:CpiScanContext):Promise<CpiScanResult>{
   const who=account();
   if(busy||maintenanceActive||sessionTransitionActive)throw new Error('Outra operação está em andamento.');
   busy=true;
@@ -101,50 +107,69 @@ async function cpiScanOneTimed(timer:StepTimer):Promise<CpiScanResult>{
     const settings=await getSettings();
     if(!settings.outputFolder)throw new Error('Configure uma pasta de PDFs antes da automação CPI.');
     let filtered: Awaited<ReturnType<CpiBrowser['filterPendingPerson29']>>;
+    // A causa original é preservada para a classificação (sessão, layout, tempo limite); a mensagem exibida é sanitizada.
     try { filtered=await timer.step('cpi_filter',()=>cpiBrowser.filterPendingPerson29()); }
-    catch { throw new Error('Etapa filtro CPI 29: falha ao atualizar a listagem.'); }
+    catch(error) { throw new Error('Etapa filtro CPI 29: falha ao atualizar a listagem.',{cause:error}); }
     if(filtered.state==='unconfirmed'||filtered.total===null)throw new Error('Etapa filtro CPI 29: total nao confirmado no portal.');
-    if(filtered.total===0)return {found:0,outcomes:[]};
+    if(filtered.total===0)return {kind:'idle',found:0};
     let listed: Awaited<ReturnType<CpiBrowser['inspectPendingRows']>>;
     try { listed=await timer.step('cpi_rows',()=>cpiBrowser.inspectPendingRows()); }
-    catch { throw new Error('Etapa leitura CPI: nao foi possivel inspecionar as linhas apos o filtro.'); }
+    catch(error) { throw new Error('Etapa leitura CPI: nao foi possivel inspecionar as linhas apos o filtro.',{cause:error}); }
     if(listed.state!=='mapped'||!listed.rows.length)throw new Error('Etapa leitura CPI: identificadores da listagem nao confirmados.');
-    const rows=listed.rows;
-    // Revalidar o CPF dentro do processo principal; o renderer nunca recebe seus dígitos.
-    const ids=await timer.step('cpi_select',async()=>{
-      for(const candidate of rows){
-        const existing=await cpiWorkflow.get(who,candidate);
-        if(existing?.stage==='completed')continue;
-        return candidate;
-      }
-      return undefined;
-    });
-    if(!ids)return {found:filtered.total,outcomes:[]};
-    const target=ids;
-    const result=await executeCpiPersonCycle({
-      account:who,ids:target,outputFolder:settings.outputFolder,timer,
-      getCpf:async()=>{await cpiBrowser.inspectPendingPersonDetails(target,timer);return cpiBrowser.readValidatedCpf(target);},
-      getJob:()=>cpiWorkflow.get(who,target),
-      claim:()=>cpiWorkflow.claim(who,target),
-      mark:(stage,updates)=>cpiWorkflow.mark(who,target,stage,updates),
-      findLatest:cpf=>history.findLatest(who,cpf,'person'),
-      beginHistory:cpf=>history.begin(who,cpf,'person'),
-      setQueryCode:(recordId,code)=>history.setCode(recordId,code),
-      getCredits:()=>client.credits(),
-      verifyPaidBalance:async credits=>{assertCpiPaidBalance(credits,await approvals.isApproved(who));},
-      paidApproved:()=>approvals.isApproved(who),
-      submitCpf:(cpf,onCode)=>client.submitCpf(cpf,onCode),
-      fetchByCode:code=>client.fetchByCode(code),
-      savePdf:(cpf,recordId,code,data)=>saveCpiPdf(who,target,settings.outputFolder!,cpf,recordId,code,data),
-      uploadAndSave:async(pdf,result)=>{
-        if(sessionAccount!==who)throw new Error('Conta Deskdata alterada durante o processamento CPI.');
-        return cpiBrowser.uploadAndSavePersonResponse(target,pdf,result,undefined,timer);
-      },
-      closeCompletedDetail:()=>cpiBrowser.closeCompletedDetail(target)
-    });
+    const rows=listed.rows,found=filtered.total;
+    // Uma leitura da fila para todas as linhas; itens finais ou em revisão nunca são reabertos.
+    const selection=await timer.step('cpi_select',async()=>cpiQueue.select(rows,await cpiWorkflow.stages(who,rows)));
+    if(!selection.ids){
+      const more=found>rows.length?' Há outras páginas na CPI que só aparecem quando a página atual for atendida.':'';
+      return {kind:'idle',found,message:`Nenhuma pesquisa elegível na página: ${selection.finalCount} em revisão ou concluída(s), ${selection.deferredCount} aguardando a Deskdata.${more}`};
+    }
+    if(context.signal.aborted)return {kind:'idle',found,message:'Pausa solicitada antes de abrir a próxima pesquisa.'};
+    const target=selection.ids;
+    context.onItem(target);
+    let result:Awaited<ReturnType<typeof executeCpiPersonCycle>>;
+    try{
+      result=await cpiProcessItem(timer,who,target,settings.outputFolder);
+    }catch(error){
+      const failure=classifyCpiError(error);
+      if(CPI_IMMEDIATE_STOP.has(failure)||sessionAccount!==who)throw error;
+      // Falha de item: revisão manual, sem nova tentativa automática deste item; o agente segue para o próximo.
+      await sendCpiItemToReview(who,target);
+      cpiQueue.release(target);
+      return {kind:'item_failed',found,ids:target,failure,message:safeCpiCycleError(error)};
+    }
+    if(result.state==='pending')cpiQueue.defer(target);else cpiQueue.release(target);
     if(sessionAccount!==who)throw new Error('Conta Deskdata alterada durante o processamento CPI.');
-    return {found:filtered.total,outcomes:[result]};
+    return {kind:'item',found,outcome:result};
   }finally{busy=false;}
+}
+/** Marca o item como revisão manual quando ainda não está em estágio final (submit_started permanece como está). */
+async function sendCpiItemToReview(who:string,ids:CpiPendingRowId):Promise<void>{
+  const job=await cpiWorkflow.claim(who,ids);
+  if(!CPI_FINAL_STAGES.has(job.stage))await cpiWorkflow.mark(who,ids,'review_required');
+}
+/** Um item CPI; o CPF é revalidado no processo principal e o renderer nunca recebe seus dígitos. */
+function cpiProcessItem(timer:StepTimer,who:string,target:CpiPendingRowId,outputFolder:string){
+  return executeCpiPersonCycle({
+    account:who,ids:target,outputFolder,timer,
+    getCpf:async()=>{await cpiBrowser.inspectPendingPersonDetails(target,timer);return cpiBrowser.readValidatedCpf(target);},
+    getJob:()=>cpiWorkflow.get(who,target),
+    claim:()=>cpiWorkflow.claim(who,target),
+    mark:(stage,updates)=>cpiWorkflow.mark(who,target,stage,updates),
+    findLatest:cpf=>history.findLatest(who,cpf,'person'),
+    beginHistory:cpf=>history.begin(who,cpf,'person'),
+    setQueryCode:(recordId,code)=>history.setCode(recordId,code),
+    getCredits:()=>client.credits(),
+    verifyPaidBalance:async credits=>{assertCpiPaidBalance(credits,await approvals.isApproved(who));},
+    paidApproved:()=>approvals.isApproved(who),
+    submitCpf:(cpf,onCode)=>client.submitCpf(cpf,onCode),
+    checkByCode:code=>client.checkByCode(code),
+    savePdf:(cpf,recordId,code,data)=>saveCpiPdf(who,target,outputFolder,cpf,recordId,code,data),
+    uploadAndSave:async(pdf,result)=>{
+      if(sessionAccount!==who)throw new Error('Conta Deskdata alterada durante o processamento CPI.');
+      return cpiBrowser.uploadAndSavePersonResponse(target,pdf,result,undefined,timer);
+    },
+    closeCompletedDetail:()=>cpiBrowser.closeCompletedDetail(target)
+  });
 }
 
 /** Gera o PDF CPI_<pesquisaId>_<solicitacaoId>_<data>.pdf e o registra na consulta, conferindo conta, CPF e código. */
@@ -520,7 +545,7 @@ if(instanceLock)app.whenReady().then(()=>{
     savePdf:saveReportPdf});
   approvals = new AccountApprovalStore(dataDir,protector);
   cpiWorkflow = new CpiWorkflowStore(dataDir,protector);
-  cpiAuto = new CpiFullAutoRunner(()=>operations.run(cpiScanOne,true),snapshot=>{
+  cpiAuto = new CpiFullAutoRunner(context=>operations.run(()=>cpiScanOne(context),true),snapshot=>{
     if(mainWindow&&!mainWindow.isDestroyed()&&!mainWindow.webContents.isDestroyed())
       mainWindow.webContents.send('cpi:auto:updated',snapshot);
   });
@@ -677,6 +702,7 @@ if(instanceLock)app.whenReady().then(()=>{
     operations.assertAccepting();
     account();
     if(cpiMonitor.isActive()||busy||maintenanceActive||operations.isExclusive())throw new Error('Conclua a operação atual antes de iniciar FULL AUTO.');
+    cpiQueue.reset();
     return cpiAuto.start(seconds);
   });
   bind('cpi:auto:pause',async()=>{account();return cpiAuto.pause();});

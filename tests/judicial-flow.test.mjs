@@ -30,7 +30,7 @@ for(const [lawsuits,reason] of [
       const forbidden=async()=>{assert.fail('Não deve consultar, gerar PDF, anexar ou submeter');};
       const services={account,ids,outputFolder:directory,getCpf:async()=>cpf,
         getJob:()=>store.get(account,ids),claim:()=>store.claim(account,ids),mark:(stage,updates)=>store.mark(account,ids,stage,updates),
-        findLatest:async()=>record,fetchByCode:async()=>{gets++;return {queryCode:code,payload:payload(lawsuits)};},
+        findLatest:async()=>record,checkByCode:async()=>{gets++;return {state:'ready',queryCode:code,payload:payload(lawsuits)};},
         beginHistory:forbidden,setQueryCode:forbidden,getCredits:forbidden,verifyPaidBalance:forbidden,
         paidApproved:forbidden,submitCpf:forbidden,savePdf:forbidden,uploadAndSave:forbidden,closeCompletedDetail:forbidden};
       const result=await executeCpiPersonCycle(services);
@@ -106,7 +106,7 @@ test('judicial: PDF ready legado não substitui relatório da resposta usada na 
     const current=payload({total:2,items:[{number:'ATUAL-A',court_type:'Civil'},{number:'ATUAL-B',court_type:'Criminal'}]});
     const services={account,ids,outputFolder:directory,getCpf:async()=>cpf,
       getJob:()=>store.get(account,ids),claim:()=>store.claim(account,ids),mark:(stage,updates)=>store.mark(account,ids,stage,updates),
-      findLatest:async()=>record,fetchByCode:async()=>({queryCode:code,payload:current}),
+      findLatest:async()=>record,checkByCode:async()=>({state:'ready',queryCode:code,payload:current}),
       beginHistory:forbidden,setQueryCode:forbidden,getCredits:forbidden,verifyPaidBalance:forbidden,paidApproved:forbidden,submitCpf:forbidden,
       savePdf:async(document,id,queryCode,data)=>{
         assert.equal(document,cpf);assert.equal(id,recordId);assert.equal(queryCode,code);renders++;

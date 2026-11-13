@@ -43,26 +43,52 @@ function fixture(count){
 }
 const nextIds={pesquisaId:'90000',solicitacaoId:'90001'};
 
-test('limite de 10.000 preserva deduplicação e estados incertos após reinício',async()=>{
+// E2 (D1, Q1): o teto de 10.000 registros foi removido. Os testes que exigiam o bloqueio por capacidade
+// passam a exigir o contrário: a fila cresce, preservando deduplicação e estados incertos após reinício.
+test('sem teto: 10.001º registro é aceito e preserva deduplicação e estados incertos após reinício',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'deskdata-cpi-store-'));
  try{
   const path=join(dir,'cpi-workflows.bin');
-  await writeFile(path,JSON.stringify(fixture(9999)));
+  await writeFile(path,JSON.stringify(fixture(10000)));
   const store=new CpiWorkflowStore(dir,protector);
   assert.equal((await store.list('a')).length,5000);
   await store.claim('b',nextIds);
   const reloaded=new CpiWorkflowStore(dir,protector);
-  assert.equal((await reloaded.list('b')).length,5000);
+  assert.equal((await reloaded.list('b')).length,5001);
   assert.equal((await reloaded.claim('b',nextIds)).stage,'claimed');
   await reloaded.mark('b',nextIds,'query_pending');
   assert.equal((await new CpiWorkflowStore(dir,protector).get('b',nextIds)).stage,'query_pending');
   assert.equal((await reloaded.get('a',{pesquisaId:'10000',solicitacaoId:'20000'})).stage,'completed');
   assert.equal((await reloaded.get('b',{pesquisaId:'10001',solicitacaoId:'20001'})).stage,'verification_required');
   assert.equal((await reloaded.get('a',{pesquisaId:'10002',solicitacaoId:'20002'})).stage,'submit_started');
-  await assert.rejects(reloaded.claim('a',{pesquisaId:'90002',solicitacaoId:'90003'}),/limite operacional/);
-  const afterFailure=new CpiWorkflowStore(dir,protector);
-  assert.equal((await afterFailure.list('a')).length,5000);
-  assert.equal((await afterFailure.list('b')).length,5000);
+  await reloaded.claim('a',{pesquisaId:'90002',solicitacaoId:'90003'});
+  const afterRestart=new CpiWorkflowStore(dir,protector);
+  assert.equal((await afterRestart.list('a')).length,5001);
+  assert.equal((await afterRestart.list('b')).length,5001);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('cache em memória: uma decifração para leituras repetidas; alteração externa do arquivo invalida o cache',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'deskdata-cpi-store-'));
+ try{
+  let decrypts=0;
+  const counting={...protector,decrypt:async buf=>{decrypts++;return protector.decrypt(buf);}};
+  const path=join(dir,'cpi-workflows.bin');
+  await writeFile(path,JSON.stringify(fixture(3)));
+  const store=new CpiWorkflowStore(dir,counting);
+  const rows=[{pesquisaId:'10000',solicitacaoId:'20000'},{pesquisaId:'10002',solicitacaoId:'20002'},nextIds];
+  assert.deepEqual(await store.stages('a',rows),['completed','submit_started',undefined]);
+  for(let i=0;i<20;i++)await store.get('a',rows[0]);
+  assert.equal(decrypts,1);
+  await store.claim('a',nextIds);
+  assert.deepEqual(await store.stages('a',rows),['completed','submit_started','claimed']);
+  assert.equal(decrypts,1,'a própria gravação atualiza o cache');
+  const copy=await store.get('a',nextIds);copy.stage='completed';
+  assert.equal((await store.get('a',nextIds)).stage,'claimed','leituras devolvem cópias, não o cache');
+  const external=fixture(3);external.items[0].stage='verification_required';
+  await writeFile(path,JSON.stringify(external)+' ');
+  assert.equal((await store.get('a',rows[0])).stage,'verification_required');
+  assert.equal(decrypts,2);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
@@ -85,11 +111,11 @@ test('falha simulada durante gravação preserva versão anterior e permite recu
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
-test('FULL AUTO pausa ao atingir limite sem iniciar nova pesquisa nem reenviar',async()=>{
+test('FULL AUTO pausa na primeira falha da fila protegida, sem iniciar nova pesquisa nem reenviar',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'deskdata-cpi-store-'));
  try{
   const path=join(dir,'cpi-workflows.bin');
-  await writeFile(path,JSON.stringify(fixture(10000)));
+  await writeFile(path,'{"version":1,"items":[');
   const store=new CpiWorkflowStore(dir,protector);
   let attempts=0;
   const runner=new CpiFullAutoRunner(async()=>{
@@ -98,40 +124,36 @@ test('FULL AUTO pausa ao atingir limite sem iniciar nova pesquisa nem reenviar',
    throw new Error('não deveria iniciar consulta');
   });
   await runner.start(30);
-  for(let i=0;i<20&&runner.status().phase!=='error';i++)await new Promise(resolve=>setTimeout(resolve,10));
+  for(let i=0;i<50&&runner.isActive();i++)await new Promise(resolve=>setTimeout(resolve,10));
   assert.equal(runner.status().phase,'error');
   assert.equal(attempts,1);
-  assert.match(runner.status().lastMessage,/limite operacional/);
-  assert.equal((await new CpiWorkflowStore(dir,protector).list('a')).length,5000);
+  assert.match(runner.status().lastMessage,/fila CPI protegida indisponível/);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
-test('10.001º claim concorrente não altera arquivo nem perde histórico anterior',async()=>{
+test('claims concorrentes acima de 10.000 registros são serializados sem perder histórico',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'deskdata-cpi-store-'));
  try{
   const path=join(dir,'cpi-workflows.bin');
   await writeFile(path,JSON.stringify(fixture(10000)));
-  const before=await readFile(path);
   const store=new CpiWorkflowStore(dir,protector);
   const results=await Promise.allSettled([
-   store.claim('a',nextIds),store.claim('b',{pesquisaId:'90002',solicitacaoId:'90003'})
+   store.claim('a',nextIds),store.claim('b',{pesquisaId:'90002',solicitacaoId:'90003'}),store.claim('a',nextIds)
   ]);
-  assert.deepEqual(results.map(result=>result.status),['rejected','rejected']);
-  assert.match(results[0].reason.message,/limite operacional/);
-  assert.deepEqual(await readFile(path),before);
+  assert.deepEqual(results.map(result=>result.status),['fulfilled','fulfilled','fulfilled']);
   const reloaded=new CpiWorkflowStore(dir,protector);
-  assert.equal((await reloaded.list('a')).length,5000);
-  assert.equal((await reloaded.list('b')).length,5000);
+  assert.equal((await reloaded.list('a')).length,5001);
+  assert.equal((await reloaded.list('b')).length,5001);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
-test('arquivo legado acima do limite é identificado sem ser tratado como corrupção',async()=>{
+test('arquivo legado com mais de 10.000 registros é carregado normalmente',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'deskdata-cpi-store-'));
  try{
   const path=join(dir,'cpi-workflows.bin');
   await writeFile(path,JSON.stringify(fixture(10001)));
   const before=await readFile(path);
-  await assert.rejects(new CpiWorkflowStore(dir,protector).list('a'),/limite operacional/);
+  assert.equal((await new CpiWorkflowStore(dir,protector).list('a')).length,5001);
   assert.deepEqual(await readFile(path),before);
  }finally{await rm(dir,{recursive:true,force:true});}
 });

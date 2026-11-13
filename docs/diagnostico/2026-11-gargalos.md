@@ -59,10 +59,10 @@ uma espera sem limite (seção 1) ou que contradiz D1.
 
 | ID | Local | Laço | Condição de parada | Risco | Sev. | Etapa |
 |---|---|---|---|---|---|---|
-| L1 | `src/main/cpi/full-auto-runner.ts:58-92` | `cycle()` reagendado por `setTimeout` | `shouldRun=false` (pausa, erro ou item em revisão) | loop | — | E2 (parada verificável já existe; ver L2) |
-| L2 | `src/main/index.ts:112-120` + `full-cycle.ts:43-46` + `full-auto-runner.ts:64-70` | seleção do próximo item | pega o **primeiro item não concluído**, inclusive `review_required`/`verification_required`; o ciclo devolve `review_required` e o runner **pausa**. A cada novo início o mesmo item volta e pausa de novo: a fila fica bloqueada por um único item | loop | **alta** | E2 (pular itens em revisão; falha de item não para o agente) |
-| L3 | `src/main/index.ts:112-120` + `full-cycle.ts:85-87` | item em `query_pending` | volta a ser escolhido a cada ciclo e executa `fetchByCode` (W2, até ≈ 16 min) com o modal aberto | loop / travamento | **alta** | E2 + E3 |
-| L4 | `src/main/cpi/full-auto-runner.ts:12-15` | atraso entre ciclos | 2 s se houve conclusão e restam itens; senão o intervalo (≥ 30 s). Sem espera crescente com fila vazia | desempenho | baixa | E2 (espera crescente de 30 s a 5 min) |
+| L1 | `src/main/cpi/full-auto-runner.ts:58-92` | `cycle()` reagendado por `setTimeout` | `shouldRun=false` (pausa, erro ou item em revisão) | loop | — | **resolvido na E2**: `while(!signal.aborted)` (`full-auto-runner.ts:121`), abortado por `pause()` (`:92`) e por parada sistêmica (`:106`); espera cancelável de ≥ 2 s por volta (`:169`) |
+| L2 | `src/main/index.ts:112-120` + `full-cycle.ts:43-46` + `full-auto-runner.ts:64-70` | seleção do próximo item | pega o **primeiro item não concluído**, inclusive `review_required`/`verification_required`; o ciclo devolve `review_required` e o runner **pausa**. A cada novo início o mesmo item volta e pausa de novo: a fila fica bloqueada por um único item | loop | **alta** | **resolvido na E2**: `queue-selection.ts` pula `completed`, `review_required`, `verification_required` e `submit_started`; falha de item vai para revisão e o agente segue |
+| L3 | `src/main/index.ts:112-120` + `full-cycle.ts:85-87` | item em `query_pending` | volta a ser escolhido a cada ciclo e executa `fetchByCode` (W2, até ≈ 16 min) com o modal aberto | loop / travamento | **alta** | **resolvido na E2** no ciclo CPI: um único `checkByCode` (35 s); se ainda 202, devolve `pending` e o item é adiado em memória (60 s → 10 min). O polling de W2 segue nas consultas manuais (E3) |
+| L4 | `src/main/cpi/full-auto-runner.ts:12-15` | atraso entre ciclos | 2 s se houve conclusão e restam itens; senão o intervalo (≥ 30 s). Sem espera crescente com fila vazia | desempenho | baixa | **resolvido na E2**: fila vazia espera 30 s → 60 → 120 → 240 → teto (padrão 300 s); 2 s após item |
 | L5 | `src/main/cpi/pending-monitor.ts:91-137` | monitor de contagem CPI | `running`/`generation`; para em erro ou ao encontrar itens | loop | — | aceito (baixo): parada clara; avaliar remoção do monitor legado em E2 |
 | L6 | `src/main/pending-queries.ts:50-87` | GET de consultas pendentes | `attempts ≥ 40`, `failures ≥ 3` ou erro permanente; reagenda a cada 2 s enquanto houver 2 GETs em curso (`:53`) | loop | baixa | aceito (baixo): limites explícitos; o reagendamento de 2 s termina quando um GET termina (cada GET tem 35 s) |
 | L7 | `src/main/deskdata-client.ts:91` | polling de resultado | 24 tentativas | loop | — | E3 (já limitado; falta cancelamento — W2) |
@@ -85,8 +85,8 @@ uma espera sem limite (seção 1) ou que contradiz D1.
 | C5 | `src/main/operations.ts:2-46` | `ApplicationOperations` (`exclusive`, `reservation`, `closing`, `active`) | exclusão por canal (`exclusiveChannels`, `index.ts:45-51`) e `runExclusiveAfter` para `cpi:close`/`auth:logout` | E4 |
 | C6 | `src/main/index.ts:75` | `activeCompletions` | recuperações de consultas pendentes aguardadas na limpeza, no login/logout e no encerramento | E4 |
 | C7 | `src/main/index.ts:525-528` | `PendingQueryMonitor.complete` roda como operação **não exclusiva**: gera PDF e altera `lastSavedPdf` em paralelo a uma operação exclusiva (inclusive um ciclo CPI) | risco de corrida | E4 |
-| C8 | `src/main/cpi/full-auto-runner.ts:32-34` | `shouldRun`, `current`, `timer` | `pause()` aguarda o ciclo em curso **sem limite** (`:53`) | E2 (pausa em até um ciclo, com cancelamento) |
-| C9 | `src/main/cpi/pending-monitor.ts:37-40` | `running`, `inFlight`, `generation` | `stopAndWait()` aguarda `inFlight` sem limite (`:88`) | E2 |
+| C8 | `src/main/cpi/full-auto-runner.ts:32-34` | `shouldRun`, `current`, `timer` | `pause()` aguarda o ciclo em curso **sem limite** (`:53`) | **resolvido na E2**: `pause()` aborta a espera na hora e aguarda só o item já iniciado, sem abrir outro (o sinal chega à varredura). O ciclo não contém mais o polling de ≈ 16 min; o limite de cada passo do navegador é E3 |
+| C9 | `src/main/cpi/pending-monitor.ts:37-40` | `running`, `inFlight`, `generation` | `stopAndWait()` aguarda `inFlight` sem limite (`:88`) | **movido para E3**: a espera é uma única leitura do filtro (`filterPendingPerson29`), cuja duração depende dos limites de W20/W21; cortar a espera sem cancelar a leitura não libera o lock exclusivo (`operations.run`) e só esconderia a leitura em curso |
 | C10 | `src/main/index.ts:165-175`, `:726`, `:756-757` | pausa do runner e do monitor feita duas vezes (no `bind` e no handler) em `cpi:close` e `auth:logout` | redundância, sem efeito incorreto | E4 |
 | C11 | `src/main/backup.ts:30`, `maintenance.ts:17`, `cpi/cpi-browser.ts:27` (`opening`) | flags locais (`creating`, `cleaning`, `opening`) | protegem contra reentrada na própria classe | E4 (absorver no `OperationGate`) |
 | C12 | `query-history.ts:51-53`, `cpi/workflow-store.ts:56`, `account-approval.ts:13`, `diagnostics.ts:8` | filas internas de serialização (`mutation`, `queue`) | serializam escrita de cada store; não são estado global de operação | aceito (baixo): manter fora do `OperationGate`; são locks de dados, não de fluxo |
@@ -96,14 +96,14 @@ uma espera sem limite (seção 1) ou que contradiz D1.
 
 | ID | Local | Operação | Custo | Risco | Sev. | Etapa |
 |---|---|---|---|---|---|---|
-| P1 | `src/main/cpi/workflow-store.ts:61-84`, `:109-112` | cada `get`/`claim`/`mark` lê, decifra (DPAPI) e valida o arquivo inteiro (até 10.000 itens); cada `mark` regrava tudo | O(n) por operação | desempenho | média | E2 |
-| P2 | `src/main/index.ts:112-120` | seleção do item: até 100 `cpiWorkflow.get` por varredura, cada um com P1 | O(100 × n) por ciclo | desempenho | média | E2 |
+| P1 | `src/main/cpi/workflow-store.ts:61-84`, `:109-112` | cada `get`/`claim`/`mark` lê, decifra (DPAPI) e valida o arquivo inteiro (até 10.000 itens); cada `mark` regrava tudo | O(n) por operação | desempenho | média | **resolvido na E2**: cache em memória validado por tamanho e mtime do arquivo; decifra só quando o arquivo muda; cada `mark` ainda regrava o arquivo (atomicidade preservada) |
+| P2 | `src/main/index.ts:112-120` | seleção do item: até 100 `cpiWorkflow.get` por varredura, cada um com P1 | O(100 × n) por ciclo | desempenho | média | **resolvido na E2**: `cpiWorkflow.stages()` lê a fila uma vez por varredura |
 | P3 | `src/main/query-history.ts:167-174` | `list`/`listAll` decifram todas as linhas; usados no login (`index.ts:263`), na limpeza e no backup | O(histórico) | desempenho | baixa | E5 |
 | P4 | `src/main/query-history.ts:238-248` | `removePdfReferences` decifra e recifra todas as linhas | O(histórico) | desempenho | baixa | aceito (baixo): só na limpeza manual |
 | P5 | `src/main/query-history.ts:92-101` | `new DatabaseSync` e `PRAGMA integrity_check` síncronos na inicialização | O(tamanho do banco), uma vez | desempenho | baixa | aceito (baixo): só na primeira operação; garante integridade antes de consultas pagas |
 | P6 | `src/main/query-history.ts:160-196` | `DatabaseSync` (`prepare`/`get`/`run`) síncrono no processo principal | por consulta, com índice | desempenho | baixa | aceito (baixo): consultas indexadas e pontuais; nenhuma em laço no FULL AUTO |
 | P7 | `src/main/backup.ts:10`, `:17` | `crc32` em JS byte a byte e `deflateRawSync` do snapshot inteiro (até 100 MB) | bloqueia a interface durante o backup | desempenho | média | E5 |
-| P8 | `src/main/index.ts:600-617` | `cpi:history:list`: decifra a fila inteira, até 100 `findById` e `stat`; chamado a cada mudança de `processed` (`renderer/main.tsx:298-302`) | O(n) por item processado | desempenho | média | E2 |
+| P8 | `src/main/index.ts:600-617` | `cpi:history:list`: decifra a fila inteira, até 100 `findById` e `stat`; chamado a cada mudança de `processed` (`renderer/main.tsx:298-302`) | O(n) por item processado | desempenho | média | **parcial na E2**: a fila CPI vem do cache (P1); os `findById`/`stat` do histórico seguem (E5) |
 | P9 | `src/main/diagnostics.ts:23-37` | cada evento faz `mkdir`, `stat`, `appendFile`, `readdir` e `stat` de todos os logs | ~6 operações de disco por evento; a Etapa 0 adiciona ~15 eventos por ciclo | desempenho | baixa | aceito (baixo): fila serial assíncrona, ≤ 6 arquivos; não bloqueia o ciclo (gravação sem `await` no ciclo) |
 | P10 | `src/main/index.ts:497` | `mkdirSync` da pasta de dados | uma vez, antes da janela | desempenho | — | aceito (baixo) |
 | P11 | `src/main/settings.ts:8-16` | `getSettings` lê `settings.json` a cada chamada | arquivo pequeno | desempenho | — | aceito (baixo) |
@@ -112,8 +112,8 @@ uma espera sem limite (seção 1) ou que contradiz D1.
 
 | ID | Local | Limite | Etapa |
 |---|---|---|---|
-| Q1 | `src/main/cpi/workflow-store.ts:24-25` | `MAX_WORK_ITEMS=10000`: com 10.000 registros na fila, todo o processamento CPI é bloqueado | E2 |
-| Q2 | `src/main/cpi/pending-rows.ts:28`, `:117` | no máximo 100 linhas mapeadas por página; páginas seguintes não são lidas | E2 (avaliar com D1: itens concluídos saem da página, os seguintes sobem) |
+| Q1 | `src/main/cpi/workflow-store.ts:24-25` | `MAX_WORK_ITEMS=10000`: com 10.000 registros na fila, todo o processamento CPI é bloqueado | **resolvido na E2**: teto removido |
+| Q2 | `src/main/cpi/pending-rows.ts:28`, `:117` | no máximo 100 linhas mapeadas por página; páginas seguintes não são lidas | **resolvido na E2** (teto local de 100 removido; vale o que a página exibe, limitado ao total do rodapé). Páginas seguintes da CPI continuam não lidas: itens atendidos saem da página e os seguintes sobem; se todas as linhas visíveis estiverem em revisão, o agente informa e espera (risco registrado para E6) |
 | Q3 | `src/main/index.ts:603` | histórico CPI exibe só os 100 concluídos mais recentes | aceito (baixo): limite de exibição, não de processamento |
 
 ## 6. Instrumentação adicionada nesta etapa
@@ -133,7 +133,8 @@ Módulo novo: `src/main/step-timing.ts` (`createStepTimer`). Cada ciclo recebe u
 | `person`, `pis`, `company` | `deskdata_credits`, `deskdata_query`, `deskdata_fetch`, `report_pdf` | `index.ts` (consultas manuais) |
 
 Valores de `outcome`: `completed`, `verification_required`, `review_required`, `pending` (CPI);
-`ready`, `pending`, `no_pis` (manuais); `empty` (filtro sem itens) e `idle` (só itens concluídos na página).
+`ready`, `pending`, `no_pis` (manuais); `empty` (filtro sem itens) e `idle` (nenhum item elegível na página);
+`item_failed` (E2: falha de item enviada para revisão).
 
 Privacidade: o temporizador só recebe nomes fixos; o `DiagnosticLogger` aceita `flow`, `step` e `outcome`
 apenas de listas fechadas e `correlationId` apenas no formato UUID. CPF, CNPJ, nomes, caminhos de PDF

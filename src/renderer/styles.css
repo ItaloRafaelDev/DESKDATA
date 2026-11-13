@@ -179,6 +179,10 @@ h1,h2,p { margin-top: 0; }
 .cpi-interval-error { color: #b83737; }
 .cpi-countdown { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0; font-size: 13px; color: #405675; }
 .cpi-countdown strong { color: #18457d; font-size: 22px; font-variant-numeric: tabular-nums; letter-spacing: .04em; }
+.cpi-agent-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin:12px 0 4px}
+.cpi-agent-stats>div{border:1px solid var(--line);border-radius:10px;padding:8px 12px;background:#f8fafd}
+.cpi-agent-stats dt{font-size:11px;color:#607894;font-weight:650}
+.cpi-agent-stats dd{margin:2px 0 0;font-size:16px;color:#163452;font-variant-numeric:tabular-nums}
 
 /* CPI 3B: a tabela apresenta apenas os IDs numericos do registro, sem CPF. */
 .cpi-id-list{max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:9px;margin-top:12px}

@@ -2,7 +2,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState, type FormEvent } 
 import { createRoot } from 'react-dom/client';
 import { cnpjDigits, formatCnpj, isValidCnpj } from '../shared/cnpj.ts';
 import { cpfDigits, formatCpf, isValidCpf } from '../shared/cpf.ts';
-import { CPI_MIN_INTERVAL_SECONDS, CPI_MAX_INTERVAL_SECONDS, parseCpiMonitorIntervalInput, getCpiRemainingSeconds, formatCpiCountdown } from '../shared/cpi-monitor-time.ts';
+import { CPI_MIN_INTERVAL_SECONDS, CPI_MAX_INTERVAL_SECONDS, parseCpiMonitorIntervalInput, getCpiRemainingSeconds, getCpiElapsedSeconds, formatCpiCountdown } from '../shared/cpi-monitor-time.ts';
 import type { AppSettings, QueryOutcome, HistoryEntry, QueryExecution, PisQueryExecution, MaintenancePreview, CpiBrowserStatus, CpiHistoryOverview, CpiPendingWorkflowPage, CpiPendingRowId, CpiAutoSnapshot } from '../shared/types.ts';
 import { loadRememberedLogin } from './ux.ts';
 import { Icon, ToastHost, type Notification } from './ui.tsx';
@@ -32,7 +32,7 @@ function App(){
   const [cpiHistory,setCpiHistory]=useState<CpiHistoryOverview|null>(null);
   const [cpiPending,setCpiPending]=useState<CpiPendingWorkflowPage|null>(null);
   const [cpiPendingPage,setCpiPendingPage]=useState(0);
-  const [cpiIntervalInput,setCpiIntervalInput]=useState('60');
+  const [cpiIntervalInput,setCpiIntervalInput]=useState('300');
   const [cpiClockMs,setCpiClockMs]=useState(()=>Date.now());
   const [notice,setNotice]=useState<Notification|null>(null);
   const nextNoticeId=useRef(0);
@@ -243,15 +243,15 @@ function App(){
   });}
   async function startFullCpi(){await run(async()=>{
     const interval=parseCpiMonitorIntervalInput(cpiIntervalInput);
-    if(interval===null)throw new Error('Informe um intervalo válido entre 30 e 86400 segundos.');
+    if(interval===null)throw new Error('Informe uma espera máxima válida entre 30 e 86400 segundos.');
     if(!settings.paidQueriesApproved)throw new Error('Autorize novas consultas em Minha conta antes de iniciar.');
-    if(!window.confirm('INICIAR AGENTE CPI?\n\nO agente poderá realizar consultas pagas enquanto houver créditos Deskdata, classificar processos, gerar PDFs e salvar respostas na CPI. Não existe limite local de quantidade. Continuará uma pesquisa por vez; erros e estados incertos interrompem o processamento. Confirmar?'))return;
+    if(!window.confirm('INICIAR AGENTE CPI?\n\nO agente poderá realizar consultas pagas enquanto houver créditos Deskdata, classificar processos, gerar PDFs e salvar respostas na CPI. Não existe limite local de quantidade: ele continua, uma pesquisa por vez, enquanto houver pesquisas pendentes. Pesquisas com erro ou resultado incerto vão para revisão manual, sem reenvio. Sessão expirada, saldo insuficiente, portal não reconhecido ou 3 falhas seguidas do mesmo tipo pausam o agente. Confirmar?'))return;
     setCpiAuto(await window.deskdata.cpiAutoStart(interval));
     show('Agente CPI iniciado. O saldo é verificado antes de cada nova consulta paga.','success');
   });}
   async function pauseFullCpi(){await run(async()=>{
     setCpiAuto(await window.deskdata.cpiAutoPause());
-    show('Pausa solicitada. A operação em andamento será concluída antes de parar.','info');
+    show('Agente pausado. Uma pesquisa já iniciada é concluída antes da pausa; nenhuma nova é aberta.','info');
     setCpiHistory(await window.deskdata.cpiHistory());
   });}
   async function closeCpi(){await run(async()=>{
@@ -298,14 +298,14 @@ function App(){
   useEffect(()=>{
     if(!logged || tab!=='cpi')return;
     void window.deskdata.cpiHistory().then(setCpiHistory).catch(()=>{});
-    if(cpiAuto?.processed){void window.deskdata.credits().then(setCreditBalance).catch(()=>setCreditBalance(null));}
-  },[logged,tab,cpiAuto?.processed]);
+    if(cpiAuto?.counters.completed){void window.deskdata.credits().then(setCreditBalance).catch(()=>setCreditBalance(null));}
+  },[logged,tab,cpiAuto?.counters.completed,cpiAuto?.counters.review]);
   useEffect(()=>{
-    if(!logged||tab!=='cpi'||cpiAuto?.phase!=='waiting'||!cpiAuto.nextCheckAt)return;
+    if(!logged||tab!=='cpi'||(cpiAuto?.phase!=='waiting'&&cpiAuto?.phase!=='running'))return;
     setCpiClockMs(Date.now());
     const timer=window.setInterval(()=>setCpiClockMs(Date.now()),1000);
     return ()=>window.clearInterval(timer);
-  },[logged,tab,cpiAuto?.phase,cpiAuto?.nextCheckAt]);
+  },[logged,tab,cpiAuto?.phase]);
   async function openHistory(recordId:string,path:string){
     await run(()=>window.deskdata.openHistoryPdf(recordId,path));
   }
@@ -314,6 +314,8 @@ function App(){
   const cpiValidInterval=parseCpiMonitorIntervalInput(cpiIntervalInput);
   const cpiCountdown=cpiAuto?.phase==='waiting'
     ? getCpiRemainingSeconds(cpiAuto.nextCheckAt,cpiClockMs):null;
+  const cpiCycleSeconds=cpiAuto?.phase==='running'?getCpiElapsedSeconds(cpiAuto.cycleStartedAt,cpiClockMs)
+    :cpiAuto?.lastCycleMs!=null?Math.round(cpiAuto.lastCycleMs/1000):null;
   if(!logged)return <div className="auth-page">
     <div className="auth-identity"><div className="brandmark">D</div><div><strong>DESKDATA</strong><small>RELATÓRIOS</small></div></div>
     <section className="auth-card" aria-labelledby="auth-title">
@@ -399,7 +401,7 @@ function App(){
       <div className="panel-heading"><h2 id="cpi-operation-title">Operação do agente</h2><p>Uma solicitação por vez, reaproveitando o histórico. Novas consultas pagas continuam enquanto houver saldo disponível e autorização da conta.</p></div>
       <div className="cpi-agent-toolbar">
         <span className={`cpi-browser-indicator${cpiBrowserOpen?' online':''}`}><span className="dot"/>{cpiBrowserOpen?'CPI conectada':'CPI desconectada'}</span>
-        <label className="cpi-interval" htmlFor="cpi-agent-interval">Verificar a cada (segundos)<input id="cpi-agent-interval" type="number" min={CPI_MIN_INTERVAL_SECONDS} max={CPI_MAX_INTERVAL_SECONDS} step={1} inputMode="numeric" value={cpiIntervalInput} onChange={event=>setCpiIntervalInput(event.target.value)} disabled={busy||cpiAutoRunning} aria-invalid={cpiValidInterval===null}/></label>
+        <label className="cpi-interval" htmlFor="cpi-agent-interval" title="Com fila vazia o agente espera 30 s, 60 s, 120 s... até este teto. Com pesquisas pendentes não há espera.">Espera máxima com fila vazia (segundos)<input id="cpi-agent-interval" type="number" min={CPI_MIN_INTERVAL_SECONDS} max={CPI_MAX_INTERVAL_SECONDS} step={1} inputMode="numeric" value={cpiIntervalInput} onChange={event=>setCpiIntervalInput(event.target.value)} disabled={busy||cpiAutoRunning} aria-invalid={cpiValidInterval===null}/></label>
         <div className="cpi-agent-actions">
           <button type="button" className="secondary" onClick={()=>void openCpi()} disabled={busy||cpiBrowserOpen}>Abrir CPI no Edge</button>
           <button type="button" className="primary" disabled={busy||!cpiBrowserOpen||cpiAutoRunning||cpiValidInterval===null||!settings.paidQueriesApproved} onClick={()=>void startFullCpi()}>Iniciar agente</button>
@@ -410,7 +412,15 @@ function App(){
       {!settings.paidQueriesApproved?<p className="hint" role="status">Autorize o consumo de créditos em <strong>Minha conta</strong> para iniciar o agente. A confirmação de início continua obrigatória.</p>:null}
       {cpiAuto?.phase==='waiting'&&cpiCountdown!==null?<p className="cpi-countdown" role="timer" aria-live="off">Próxima verificação em <strong>{formatCpiCountdown(cpiCountdown)}</strong></p>:null}
       {cpiAuto?.lastMessage?<div className={`cpi-agent-message${cpiAuto.phase==='error'?' error':''}`} role="status">{cpiAuto.lastMessage}</div>:null}
-      <p className="hint">Ciclos nesta sessão: {cpiAuto?.checks??0} · Concluídas nesta sessão: {cpiAuto?.processed??0}. Sem teto local de consultas; saldo zerado ou insuficiente, erro de identificação e salvamento incerto suspendem novos envios. Não há repetição automática de POST ou anexo.</p>
+      <dl className="cpi-agent-stats" aria-label="Sessão do agente">
+        <div><dt>Pesquisa atual</dt><dd>{cpiAuto?.currentItem?`${cpiAuto.currentItem.pesquisaId} / ${cpiAuto.currentItem.solicitacaoId}`:'—'}</dd></div>
+        <div><dt>{cpiAuto?.phase==='running'?'Ciclo em andamento':'Último ciclo'}</dt><dd>{cpiCycleSeconds===null?'—':formatCpiCountdown(cpiCycleSeconds)}</dd></div>
+        <div><dt>Concluídas</dt><dd>{cpiAuto?.counters.completed??0}</dd></div>
+        <div><dt>Em revisão</dt><dd>{cpiAuto?.counters.review??0}</dd></div>
+        <div><dt>Falhas</dt><dd>{cpiAuto?.counters.failures??0}</dd></div>
+        <div><dt>Ciclos</dt><dd>{cpiAuto?.checks??0}</dd></div>
+      </dl>
+      <p className="hint">Contadores desta sessão do agente. Sem teto local de consultas: o agente segue enquanto houver pesquisas pendentes. Pesquisas com erro vão para revisão; sessão expirada, saldo insuficiente, portal não reconhecido ou 3 falhas seguidas do mesmo tipo pausam o agente. Não há repetição automática de POST ou anexo.</p>
     </section>
     <section className="panel cpi-dashboard-panel" aria-labelledby="cpi-history-title">
       <div className="cpi-history-heading"><div className="panel-heading"><h2 id="cpi-history-title">Histórico de respostas na CPI</h2><p>Somente pesquisas concluídas pelo agente e vinculadas à conta autenticada. Os dados permanecem protegidos no computador.</p></div><button type="button" className="secondary" disabled={busy} onClick={()=>void refreshCpiHistory()}>Atualizar histórico</button></div>

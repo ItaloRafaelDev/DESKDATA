@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseCpiMonitorIntervalInput, getCpiRemainingSeconds, formatCpiCountdown,
+  parseCpiMonitorIntervalInput, getCpiRemainingSeconds, getCpiElapsedSeconds, formatCpiCountdown,
   CPI_MIN_INTERVAL_SECONDS, CPI_MAX_INTERVAL_SECONDS
 } from '../src/shared/cpi-monitor-time.ts';
 
@@ -24,6 +24,14 @@ test('CPI: temporizador calcula tempo restante e limita zero sem antecipar execu
   assert.equal(getCpiRemainingSeconds(null, start), null);
   assert.equal(getCpiRemainingSeconds('invalid', start), null);
   assert.equal(getCpiRemainingSeconds(target, NaN), null);
+});
+
+test('E2: duração do ciclo em andamento a partir do início publicado', () => {
+  const start = '2026-11-12T12:00:00.000Z', base = Date.parse(start);
+  assert.equal(getCpiElapsedSeconds(start, base + 61_900), 61);
+  assert.equal(getCpiElapsedSeconds(start, base - 5_000), 0);
+  assert.equal(getCpiElapsedSeconds(null, base), null);
+  assert.equal(getCpiElapsedSeconds('invalid', base), null);
 });
 
 test('CPI: temporizador mostra segundos, minutos e horas', () => {
