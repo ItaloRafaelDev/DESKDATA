@@ -281,7 +281,7 @@ test('E3/W13: prazo do salvamento antes do anexo devolve not_submitted e o corpo
 }));
 test('E3/W16: espera sem fim depois do clique em Alterar vira unverified, sem segundo envio',()=>portalFixture({},async({driver,pdf,posts})=>{
   const reached=deferred();
-  driver.savedResponseEvidence=()=>{reached.resolve();return hang();};
+  driver.waitForFormExit=()=>{reached.resolve();return hang();};
   const saving=driver.uploadAndSavePersonResponse(ids,pdf,'information',2000);
   await reached.promise;
   // Simula cpi:close sem encerrar o navegador do fixture: mesmo caminho de cancelamento do prazo.

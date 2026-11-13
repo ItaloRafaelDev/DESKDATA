@@ -116,6 +116,7 @@ if(instanceLock)app.whenReady().then(()=>{
     maintenance:new MaintenanceService(store),
     backups:new BackupService({userData:dataDir,backupDirectory:app.isPackaged?join(dataDir,'backups'):join(app.getAppPath(),'backups'),history:store,protector,getSettings}),
     approvals:new AccountApprovalStore(dataDir,protector),credentials:new CredentialStore(dataDir,protector),
+    cpiRehearsal:!app.isPackaged&&process.env.DESKDATA_CPI_ENSAIO==='1',
     diagnostics:logger,dataDir,getSettings,pickOutputFolder,saveOutputFolder,
     pdf:{saveCpiReportPdf,savePisReportPdf,saveCompanyReportPdf},
     showMessageBox:options=>mainWindow?dialog.showMessageBox(mainWindow,options):dialog.showMessageBox(options),

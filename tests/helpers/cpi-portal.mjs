@@ -4,22 +4,57 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CpiBrowser } from '../../src/main/cpi/cpi-browser.ts';
 
+/**
+ * Portal CPI simulado para testes do formulário "Responder / Atualizar Pesquisa".
+ * Modela os seletores do projeto AGENTE_PESQUISA_FORUM_NACIONAL, em uso no portal real
+ * (id_pesquisador, id_pesq_status, #consta1..3 surgindo após o Status, #MainPage_FileUpload1,
+ * a.button com upd_pesq e confirm nativo). NÃO é homologação do portal: a validação real é manual.
+ */
 export const ids={pesquisaId:'537987',solicitacaoId:'275064'};
 export const origin='https://adm.cpicentral.com.br';
 export const detailUrl=`${origin}/zpersEspecial/pesquisas/upd_cad/mod_tt_pesq_upd.aspx?id_sol=${ids.solicitacaoId}&id_pesq_tipo=${ids.pesquisaId}`;
-const row=(label,value)=>`<div class="row"><div class="cell">${label}:</div><div class="cell">${value}</div></div>`;
+const row=(label,value)=>`<div class="row"><div class="cell txt">${label}:</div><div class="cell field">${value}</div></div>`;
 export function headings(target=ids,legacy=false){
   return legacy?`<div class="mt">Dados da Solicitação: ${target.solicitacaoId}</div><h3>Dados da Pesquisa: ${target.pesquisaId}</h3>`
     :`<h2>Dados Solicitação ${target.solicitacaoId}</h2><h2>Dados da Pesquisa - ${target.pesquisaId}</h2>`;
 }
-export function editable({legacy=false,target=ids,action=detailUrl}={}){
-  return `<html><head><meta charset="utf-8"></head><body>${headings(target,legacy)}<form method="post" action="${action}" enctype="multipart/form-data">
+const sources=`<option value="INDEF">* Indefinido *</option><option value="DESKDATA">Desk Data</option><option value="OUTRA">Outra Fonte</option>`;
+const radios=`<input type="radio" name="consta" id="consta0" value="C0"><label for="consta0">Indefinido</label>`+
+  `<input type="radio" name="consta" id="consta1" value="C1"><label for="consta1">Nada Consta</label>`+
+  `<input type="radio" name="consta" id="consta2" value="C2"><label for="consta2">Há Informações</label>`+
+  `<input type="radio" name="consta" id="consta3" value="C3"><label for="consta3">Sim, Consta Restrições</label>`;
+/**
+ * @param {object} o
+ * @param {boolean} [o.statusReloads] a troca de Status zera a Fonte antes de exibir os radios (postback simulado)
+ * @param {boolean} [o.noRadios] os radios nunca aparecem
+ * @param {string} [o.confirmText] mensagem do confirm do botão Alterar
+ * @param {boolean} [o.keepChecked] "Permanecer nesta tela" começa marcado
+ */
+export function editable({legacy=false,target=ids,statusReloads=false,noRadios=false,keepChecked=false,
+  confirmText='Deseja Realmente Alterar esta Pesquisa?'}={}){
+  return `<html><head><meta charset="utf-8"></head><body>${headings(target,legacy)}
+  <form name="form_cad" method="post" action="${detailUrl}" enctype="multipart/form-data">
     ${row('CPF','529.982.247-25')}${row('Pesquisa','PROCESSOS JUDICIAIS CRIMINAL FORUM NACIONAL CPF')}
-    ${row('Pesquisador/Fonte','<select name="source"><option>Outra</option><option>Desk Data</option></select>')}
-    ${row('Status','<select name="status"><option>Aguardando Pesquisa</option><option>Respondida</option></select>')}
-    ${row('Resultado','<input id="info" name="result" value="information" type="radio"><label for="info">Há Informações</label><input id="restrictions" name="result" value="restrictions" type="radio"><label for="restrictions">Sim, Consta Restrições</label>')}
-    <input type="file" accept=".pdf" name="document"><button type="submit" onclick="return confirm('Deseja alterar esta pesquisa?')">Alterar</button>
-    </form></body></html>`;
+    ${row('Pesquisador/Fonte',`<select name="id_pesquisador">${sources}</select>`)}
+    ${row('Pesquisador/Fonte 1º',`<select name="id_pesquisador_prim">${sources}</select>`)}
+    ${row('Status','<select name="id_pesq_status" onchange="mudouStatus()"><option value="AGUARDANDO">Aguardando Pesquisa</option><option value="RESPONDIDA">Respondida</option></select>')}
+    ${row('Resultado','<span id="resultado"></span>')}
+    ${row('Em Arquivo','<input type="file" name="ctl00$MainPage$FileUpload1" id="MainPage_FileUpload1">')}
+    <div class="row"><input type="checkbox" id="chkPermanecer" name="permanecer" value="1"${keepChecked?' checked':''}><label for="chkPermanecer">Permanecer nesta tela</label></div>
+    <div class="pa ac"><a class="button" href="javascript:void(0)" onclick="upd_pesq()">Alterar</a></div>
+  </form>
+  <script>
+    function mudouStatus(){
+      setTimeout(function(){
+        ${statusReloads?"if(!window.__recarregou){window.__recarregou=true;document.querySelector('[name=id_pesquisador]').selectedIndex=0;}":''}
+        ${noRadios?'':`if(!document.getElementById('consta2'))document.getElementById('resultado').innerHTML=${JSON.stringify(radios)};`}
+      },150);
+    }
+    function upd_pesq(){
+      var marcado=document.querySelector('input[name=consta]:checked');
+      if(confirm(${JSON.stringify(confirmText)}+'\\nResultado >>> '+(marcado?marcado.nextElementSibling.textContent:'')))document.forms.form_cad.submit();
+    }
+  </script></body></html>`;
 }
 export function persisted({target=ids,legacy=false,result='information',omit,source='Desk Data'}={}){
   return `<html><head><meta charset="utf-8"></head><body>${headings(target,legacy)}${row('Status','Respondida')}
@@ -28,12 +63,27 @@ export function persisted({target=ids,legacy=false,result='information',omit,sou
     ${omit==='timestamp'?'':row('Respondida em','11/11/2026 10:30:00')}
     ${omit==='pdf'?'':row('Em arquivo','Documento PDF')}</body></html>`;
 }
+/** Valor de um campo simples no corpo multipart do POST (null se ausente). */
+export function postedField(body,name){
+  if(!body)return null;
+  const match=body.toString('latin1').match(new RegExp(`name="${name.replace(/[$]/g,'\\$&')}"\\r\\n\\r\\n([^\\r]*)\\r\\n`));
+  return match?match[1]:null;
+}
+const afterSavePages={
+  modal_open:'<html><body><h2>Pesquisa alterada</h2></body></html>',
+  list:'<html><body><script>parent.document.getElementById("sb-container").style.display="none"</script></body></html>',
+  error_alert:'<html><body><script>alert("Erro ao gravar a pesquisa")</script></body></html>',
+  error_text:'<html><body><div>Erro ao salvar: operação rejeitada.</div></body></html>'
+};
 
-/** Todos os requests são respondidos localmente; nenhuma rota usa continue/fetch. */
+/**
+ * Todos os requests são respondidos localmente; nenhuma rota usa continue/fetch.
+ * options.afterSave: 'modal_open' (padrão) | 'list' | 'error_alert' | 'error_text' | 'login' | 'http500'
+ */
 export async function portalFixture(options,run){
   const browser=await chromium.launch({channel:'msedge',headless:true});
   const dir=await mkdtemp(join(tmpdir(),'deskdata-cpi-confirmation-'));
-  const pdf=join(dir,'report.pdf');
+  const pdf=join(dir,'CPI_537987_275064_2026-11-13.pdf');
   await writeFile(pdf,'%PDF-1.4\n'+'fixture'.repeat(30));
   const context=await browser.newContext({serviceWorkers:'block'});
   let posts=0,postedBody=null,attachedFile=null;
@@ -49,10 +99,15 @@ export async function portalFixture(options,run){
     if(request.method()==='POST'){
       posts++;postedBody=request.postDataBuffer();
       if(options.afterPost)return options.afterPost(route);
-      return route.fulfill({status:200,contentType:'text/html',body:options.saved??persisted(options)});
+      const mode=options.afterSave??'modal_open';
+      if(mode==='login')return route.fulfill({status:302,headers:{location:origin+'/acesso/checkUser.aspx'},body:''});
+      if(mode==='http500')return route.fulfill({status:500,contentType:'text/html',body:'<h1>Erro de servidor no aplicativo</h1>'});
+      return route.fulfill({status:200,contentType:'text/html',body:options.saved??afterSavePages[mode]});
     }
     if(url.pathname==='/fixture-list')return route.fulfill({contentType:'text/html',body:
-      `<div id="sb-container"><iframe id="sb-content" src="${detailUrl}"></iframe></div>${options.extraFrame??''}`});
+      `<div id="sb-container"><div id="sb-title-inner">Responder / Atualizar Pesquisa <a title="Fechar" onclick="Shadowbox.close()">x</a></div>`+
+      `<iframe id="sb-content" src="${detailUrl}"></iframe></div>${options.extraFrame??''}`+
+      `<script>var Shadowbox={close:function(){document.getElementById('sb-container').style.display='none';}};</script>`});
     if(url.pathname==='/acesso/checkUser.aspx')return route.fulfill({contentType:'text/html',body:'<input type="password">Login'});
     if(options.pages?.[url.pathname]){
       const page=options.pages[url.pathname];

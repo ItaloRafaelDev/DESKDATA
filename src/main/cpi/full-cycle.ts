@@ -10,7 +10,7 @@ import { findCpiPersonPdf } from './person-pdf.ts';
 import type { CpiWorkItem, CpiWorkStage } from './workflow-store.ts';
 import { NULL_TIMER, type StepTimer } from '../step-timing.ts';
 
-export type CpiCycleOutcome = {state:'completed'|'verification_required'|'pending'|'review_required'; pesquisaId:string;solicitacaoId:string;message:string;warning?:'auxiliary_404';reviewReason?:JudicialIssueCode};
+export type CpiCycleOutcome = {state:'completed'|'verification_required'|'pending'|'review_required'|'dry_run'; pesquisaId:string;solicitacaoId:string;message:string;warning?:'auxiliary_404';reviewReason?:JudicialIssueCode};
 export interface FullCycleServices {
   account:string;
   ids:CpiPendingRowId;
@@ -30,8 +30,12 @@ export interface FullCycleServices {
   checkByCode(code:string):Promise<{state:'pending';queryCode:string}|{state:'ready';queryCode:string;payload:unknown}>;
   /** Grava o PDF CPI (CPI_<pesquisaId>_<solicitacaoId>_<data>.pdf) e o registra na consulta. */
   savePdf(cpf:string,recordId:string,queryCode:string|undefined,data:NormalizedData):Promise<void>;
-  uploadAndSave(pdfPath:string,classification:'restrictions'|'information'):Promise<'confirmed'|'confirmed_auxiliary_404'|'unverified'|'not_submitted'>;
+  uploadAndSave(pdfPath:string,classification:'restrictions'|'information',mode?:'save'|'dry_run'):Promise<'confirmed'|'confirmed_auxiliary_404'|'unverified'|'not_submitted'|'dry_run_ok'>;
   closeCompletedDetail():Promise<void>;
+  /** Modo ensaio (somente desenvolvimento): preenche e anexa, cancela a confirmação e não salva. */
+  dryRun?:boolean;
+  /** Fecha o formulário ensaiado sem salvar (obrigatório quando `dryRun`). */
+  closeWithoutSaving?():Promise<void>;
   /** Medição de duração por etapa; recebe apenas nomes fixos de etapa. */
   timer?:Pick<StepTimer,'step'>;
 }
@@ -122,6 +126,22 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
   // Nunca voltar silenciosamente ao PDF legado se a geração atual não foi vinculada.
   const pdf=await findCpiPersonPdf({...updated,pdfPaths:currentPdfPaths},cpf,s.outputFolder,s.ids);
   await s.mark('pdf_ready',{historyRecordId:record.id,classification:classification.result});
+  if(s.dryRun){
+    // Ensaio: sem checkpoint de envio. O item permanece em pdf_ready e pode ser processado depois de verdade.
+    if(!s.closeWithoutSaving)throw new Error('Modo ensaio sem fechamento do formulário configurado.');
+    const rehearsal=await s.uploadAndSave(pdf,classification.result,'dry_run');
+    if(rehearsal==='not_submitted'){
+      await s.mark('review_required');
+      return outcome(s,'review_required','Ensaio: falha ao preencher ou anexar no formulário CPI; nada foi salvo. Revisão manual necessária.');
+    }
+    if(rehearsal!=='dry_run_ok'){
+      await s.mark('verification_required');
+      return outcome(s,'verification_required','Ensaio: o portal registrou atividade inesperada no formulário; verificar manualmente, sem reenvio.');
+    }
+    await s.closeWithoutSaving();
+    const label=classification.result==='restrictions'?'Sim, Consta Restrições':'Há Informações';
+    return outcome(s,'dry_run',`Ensaio concluído (${label}): campos preenchidos e PDF anexado; nada foi salvo.`);
+  }
   // Sem retry após esta marcação: eventual timeout ou queda pode significar envio já aceito.
   await s.mark('submit_started');
   let confirmation:Awaited<ReturnType<FullCycleServices['uploadAndSave']>>;

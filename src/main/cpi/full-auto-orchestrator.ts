@@ -84,11 +84,13 @@ function cpiProcessItem(ctx: MainContext, timer: StepTimer, who: string, target:
     submitCpf: (cpf, onCode) => client.submitCpf(cpf, onCode),
     checkByCode: code => client.checkByCode(code),
     savePdf: (cpf, recordId, code, data) => saveCpiPdf(ctx, who, target, outputFolder, cpf, recordId, code, data),
-    uploadAndSave: async (pdf, result) => {
+    uploadAndSave: async (pdf, result, mode = 'save') => {
       if (ctx.session.account !== who) throw new Error('Conta Deskdata alterada durante o processamento CPI.');
-      return cpiBrowser.uploadAndSavePersonResponse(target, pdf, result, undefined, timer);
+      return cpiBrowser.uploadAndSavePersonResponse(target, pdf, result, undefined, timer, mode);
     },
-    closeCompletedDetail: () => cpiBrowser.closeCompletedDetail(target)
+    closeCompletedDetail: () => cpiBrowser.closeCompletedDetail(target),
+    dryRun: ctx.cpiRehearsal,
+    closeWithoutSaving: () => cpiBrowser.closeDetailWithoutSaving(target)
   });
 }
 /** Gera o PDF CPI_<pesquisaId>_<solicitacaoId>_<data>.pdf e o registra na consulta, conferindo conta, CPF e código. */

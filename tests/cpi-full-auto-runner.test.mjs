@@ -190,3 +190,14 @@ test('exibe motivo da falha sem mostrar CPF ou URL', () => {
   assert.doesNotMatch(safeCpiCycleError(new Error('CPF 123.456.789-09 na URL https://example.com/teste')), /123|example.com/);
   assert.match(safeCpiCycleError(new Error('CPF 123.456.789-09 na URL https://example.com/teste')), /\[CPF\]|\[URL\]/);
 });
+
+test('ensaio: um item dry_run pausa o agente com a mensagem do ensaio, sem contar conclusão nem falha',async()=>{
+  let calls=0;const clock=virtualClock(600);
+  const run=runnerWith(async()=>{calls++;return {kind:'item',found:2,outcome:outcome(1,'dry_run',{message:'Ensaio concluído (Há Informações): campos preenchidos e PDF anexado; nada foi salvo.'})};},clock);
+  await run.start(60);
+  while(run.isActive())await nextTurn();
+  const status=run.status();
+  assert.equal(calls,1);assert.equal(status.phase,'paused');
+  assert.match(status.lastMessage,/Ensaio concluído.*Agente pausado após o ensaio/);
+  assert.deepEqual(status.counters,{completed:0,review:0,failures:0,pending:0});
+});

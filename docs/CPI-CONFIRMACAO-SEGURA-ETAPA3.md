@@ -1,5 +1,7 @@
 # CPI — confirmação segura de salvamento (Etapa 3)
 
+> **Atualização (v0.2):** a regra de conclusão do salvamento foi substituída por `CPI-RESPOSTA-FORMULARIO.md`. A reconciliação manual (`inspectPersistedPersonResponse`) continua como descrita aqui.
+
 Baseline: `55370714b82a0e0ec12ea8568b95ae00b96f9861`.
 
 ## Evidência disponível e limites

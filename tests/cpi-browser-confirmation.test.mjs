@@ -1,77 +1,69 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { portalFixture, ids, persisted, origin, editable } from './helpers/cpi-portal.mjs';
-
-test('CPI: modal fechado após HTTP 200 e confirm não comprova persistência',()=>portalFixture({
-  afterPost:route=>route.fulfill({contentType:'text/html',body:'<script>parent.document.getElementById("sb-container").remove()</script>'})
-},async({driver,pdf,posts})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
-  assert.equal(posts(),1);
-}));
-
-test('CPI: POST 200 com erro de negócio não comprova persistência mesmo com campos de resposta',()=>portalFixture({
-  saved:persisted()+'<div>Erro ao salvar: operação rejeitada.</div>'
-},async({driver,pdf,posts})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
-  assert.equal(posts(),1);
-}));
-
-test('CPI: POST redirecionado ao login não conclui a pesquisa',()=>portalFixture({
-  afterPost:route=>route.fulfill({status:302,headers:{location:origin+'/acesso/checkUser.aspx'},body:''})
-},async({driver,pdf,posts})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
-  assert.equal(posts(),1);
-}));
-
-test('CPI: resposta persistida confirma IDs, classificação e o PDF selecionado',()=>portalFixture({result:'restrictions'},async({driver,pdf,posts,body,attachedFile})=>{
-  const before=await readFile(pdf);
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'restrictions',2000),'confirmed');
-  assert.equal(posts(),1);
-  assert.ok(body().includes(Buffer.from('report.pdf')));
-  assert.ok(body().includes(Buffer.from('restrictions')));
-  assert.deepEqual(attachedFile(),before);
-  assert.deepEqual(await readFile(pdf),before);
-}));
+import { portalFixture, ids, persisted, editable, postedField } from './helpers/cpi-portal.mjs';
 
 function stepRecorder(){
   const steps=[];
   return {steps,timer:{begin:step=>{let done=false;return state=>{if(!done){done=true;steps.push(`${step}:${state}`);}};}}};
 }
+const modalVisible=page=>page.locator('#sb-container').isVisible();
 
-test('CPI: tempos de abrir detalhe, ler CPF, preencher, anexar e salvar são medidos em etapas separadas',()=>portalFixture({},async({driver,pdf})=>{
-  const {steps,timer}=stepRecorder();
-  await driver.inspectPendingPersonDetails(ids,timer);
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',2000,timer),'confirmed');
-  assert.deepEqual(steps,['cpi_open_detail:success','cpi_read_cpf:success','cpi_fill:success','cpi_attach:success','cpi_save:success']);
+// ---------- preenchimento e envio (sequência do portal real) ----------
+test('CPI: Há Informações preenche Fonte, Status, #consta2 e anexa o PDF; Fonte 1º intocada',()=>portalFixture({},async({driver,pdf,posts,body,attachedFile})=>{
+  const before=await readFile(pdf);
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',3000),'confirmed');
+  assert.equal(posts(),1);
+  assert.equal(postedField(body(),'id_pesquisador'),'DESKDATA');
+  assert.equal(postedField(body(),'id_pesquisador_prim'),'INDEF');
+  assert.equal(postedField(body(),'id_pesq_status'),'RESPONDIDA');
+  assert.equal(postedField(body(),'consta'),'C2');
+  assert.equal(postedField(body(),'permanecer'),null);
+  assert.ok(body().includes(Buffer.from('CPI_537987_275064_2026-11-13.pdf')));
+  assert.deepEqual(attachedFile(),before);
+  assert.deepEqual(await readFile(pdf),before);
 }));
 
-test('CPI: salvamento sem confirmação encerra a etapa de salvar como falha',()=>portalFixture({
-  afterPost:route=>route.fulfill({status:302,headers:{location:origin+'/acesso/checkUser.aspx'},body:''})
-},async({driver,pdf})=>{
-  const {steps,timer}=stepRecorder();
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500,timer),'unverified');
-  assert.deepEqual(steps,['cpi_fill:success','cpi_attach:success','cpi_save:failed']);
+test('CPI: Sim, Consta Restrições marca #consta3 e nunca Nada Consta',()=>portalFixture({},async({driver,pdf,posts,body})=>{
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'restrictions',3000),'confirmed');
+  assert.equal(posts(),1);
+  assert.equal(postedField(body(),'consta'),'C3');
 }));
 
-for(const target of [{...ids,pesquisaId:'1537987'},{...ids,solicitacaoId:'1275064'}]){
-  test(`CPI: IDs com prefixos comuns não confirmam ${target.pesquisaId}/${target.solicitacaoId}`,()=>portalFixture({saved:persisted({target})},async({driver,pdf,posts})=>{
-    assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
+test('CPI: Status que recarrega o bloco e zera a Fonte é reaplicado até a Fonte ficar Desk Data',()=>portalFixture({statusReloads:true},async({driver,pdf,body})=>{
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',3000),'confirmed');
+  assert.equal(postedField(body(),'id_pesquisador'),'DESKDATA');
+  assert.equal(postedField(body(),'id_pesq_status'),'RESPONDIDA');
+}));
+
+test('CPI: "Permanecer nesta tela" marcado é desmarcado antes de salvar',()=>portalFixture({keepChecked:true},async({driver,pdf,body})=>{
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',3000),'confirmed');
+  assert.equal(postedField(body(),'permanecer'),null);
+}));
+
+test('CPI: retorno automático à lista (modal fechado pelo portal) é confirmado',()=>portalFixture({afterSave:'list'},async({driver,page,pdf,posts})=>{
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',3000),'confirmed');
+  assert.equal(posts(),1);assert.equal(await modalVisible(page),false);
+}));
+
+for(const afterSave of ['error_alert','error_text','login','http500']){
+  test(`CPI: resposta do portal com ${afterSave} fica incerta, sem segundo envio`,()=>portalFixture({afterSave},async({driver,pdf,posts})=>{
+    assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',3000),'unverified');
     assert.equal(posts(),1);
+    await assert.rejects(driver.closeCompletedDetail(ids),/resposta não confirmada/);
   }));
 }
 
-test('CPI: título ambíguo não é aceito por fallback de substring do corpo',()=>portalFixture({
-  saved:persisted().replace('Dados Solicitação 275064','Dados Solicitação 275064 / 275065')
-},async({driver,pdf})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
+// ---------- falhas antes do envio ----------
+test('CPI: diálogo diferente do esperado é cancelado e nada é enviado',()=>portalFixture({confirmText:'Deseja excluir esta pesquisa?'},async({driver,pdf,posts})=>{
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',2000),'not_submitted');
+  assert.equal(posts(),0);
 }));
 
-test('CPI: evidência de outro frame não completa a resposta do formulário submetido',()=>portalFixture({
-  extraFrame:'<iframe src="/other"></iframe>',pages:{'/other':persisted()},
-  saved:'<html><body>Erro ao salvar: operação rejeitada.</body></html>'
-},async({driver,pdf})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
+test('CPI: radios de Resultado que não aparecem impedem anexar e enviar',()=>portalFixture({noRadios:true},async({driver,pdf,posts,attachedFile})=>{
+  driver.timeouts={...driver.timeouts,fieldWait:300};
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',2000),'not_submitted');
+  assert.equal(posts(),0);assert.equal(attachedFile(),null);
 }));
 
 test('CPI: troca do frame após leitura impede anexar e submeter',()=>portalFixture({},async({driver,page,pdf,posts})=>{
@@ -91,93 +83,77 @@ test('CPI: IDs alterados antes do upload impedem envio comprovadamente',()=>port
 }));
 
 test('CPI: identidade alterada durante preenchimento impede anexar PDF a outra pesquisa',()=>portalFixture({
-  initial:editable().replace('<select name="source">','<select name="source" onchange="window.document.querySelector(\'h2\').textContent=\'Dados Solicitação 1275064\'">')
+  initial:editable().replace('<select name="id_pesquisador">','<select name="id_pesquisador" onchange="document.querySelector(\'h2\').textContent=\'Dados Solicitação 1275064\'">')
 },async({driver,pdf,posts,attachedFile})=>{
   assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'not_submitted');
   assert.equal(posts(),0);assert.equal(attachedFile(),null);
 }));
 
-for(const omit of ['timestamp','pdf','source']){
-  test(`CPI: campo persistido ausente (${omit}) mantém resultado incerto`,()=>portalFixture({omit},async({driver,pdf})=>{
-    assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
-  }));
-}
-
-test('CPI: fonte persistida divergente não conclui a pesquisa',()=>portalFixture({source:'Outra'},async({driver,pdf})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
-}));
-
-test('CPI: classificação persistida divergente mantém resultado incerto',()=>portalFixture({result:'information'},async({driver,pdf})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'restrictions',500),'unverified');
-}));
-
-for(const [name,from,to] of [
-  ['resultado negado','Há Informações','Não há informações'],
-  ['documento negado','Documento PDF','Sem documento PDF'],
-  ['data inválida','11/11/2026','99/99/0000']
-]){
-  test(`CPI: ${name} não é evidência positiva`,()=>portalFixture({saved:persisted().replace(from,to)},async({driver,pdf})=>{
-    assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
-  }));
-}
-
-test('CPI: POST 200 seguido de GET na mesma URL não confirma o documento do POST',()=>portalFixture({
-  initial:editable(),afterPost:route=>route.fulfill({contentType:'text/html',body:'<script>location.replace(location.href)</script>'}),
-  pages:{'/zpersEspecial/pesquisas/upd_cad/mod_tt_pesq_upd.aspx':posts=>posts?persisted():editable()}
-},async({driver,pdf})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',700),'unverified');
-}));
-
-for(const change of ['navigation','alert']){
-  test(`CPI: ${change} durante leitura da evidência invalida o snapshot`,()=>portalFixture({},async({driver,pdf})=>{
-    const original=driver.savedResponseEvidence.bind(driver);
-    driver.savedResponseEvidence=async(...args)=>{
-      const evidence=await original(...args);
-      if(evidence){
-        if(change==='navigation')await args[0].goto(args[0].url());
-        else await args[0].evaluate(()=>alert('Erro ao salvar'));
-      }
-      return evidence;
-    };
-    assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',2000),'unverified');
-  }));
-}
-
-test('CPI: POST disparado durante preenchimento torna a falha posterior incerta',()=>portalFixture({
-  initial:editable().replace('<select name="source">','<select name="source" onchange="this.form.submit()">')
+test('CPI: POST disparado pelo anexo torna o resultado incerto (sem clicar em Alterar)',()=>portalFixture({
+  initial:editable().replace('id="MainPage_FileUpload1">','id="MainPage_FileUpload1" onchange="document.forms.form_cad.submit()">')
 },async({driver,pdf,posts})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',2000),'unverified');
   assert.equal(posts(),1);
 }));
 
-test('CPI: erro de conexão após submissão não autoriza repetir',()=>portalFixture({
-  afterPost:route=>route.abort('connectionreset')
-},async({driver,pdf,posts})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
+// ---------- etapas medidas ----------
+test('CPI: tempos de abrir detalhe, ler CPF, preencher, anexar e salvar são medidos em etapas separadas',()=>portalFixture({},async({driver,pdf})=>{
+  const {steps,timer}=stepRecorder();
+  await driver.inspectPendingPersonDetails(ids,timer);
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',3000,timer),'confirmed');
+  assert.deepEqual(steps,['cpi_open_detail:success','cpi_read_cpf:success','cpi_fill:success','cpi_attach:success','cpi_save:success']);
+}));
+
+test('CPI: salvamento sem confirmação encerra a etapa de salvar como falha',()=>portalFixture({afterSave:'login'},async({driver,pdf})=>{
+  const {steps,timer}=stepRecorder();
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',3000,timer),'unverified');
+  assert.deepEqual(steps,['cpi_fill:success','cpi_attach:success','cpi_save:failed']);
+}));
+
+test('CPI: template com títulos fora de h2 usa os mesmos IDs no upload',()=>portalFixture({legacy:true},async({driver,pdf,posts})=>{
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',3000),'confirmed');
   assert.equal(posts(),1);
 }));
 
-test('CPI: POST de outro formulário no mesmo frame não é a resposta correlacionada',()=>portalFixture({
-  initial:editable().replace('type="submit" onclick="return confirm(\'Deseja alterar esta pesquisa?\')"',
-    'type="button" onclick="if(confirm(\'Deseja alterar esta pesquisa?\')){this.form.action=\'/unrelated\';this.form.submit()}"')
-},async({driver,pdf,posts})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
-  assert.equal(posts(),1);
+// ---------- modo ensaio ----------
+test('CPI: modo ensaio preenche e anexa, cancela o diálogo e não envia nada',()=>portalFixture({},async({driver,page,pdf,posts,attachedFile})=>{
+  const {steps,timer}=stepRecorder();
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',2000,timer,'dry_run'),'dry_run_ok');
+  assert.equal(posts(),0);assert.ok(attachedFile());
+  assert.deepEqual(steps,['cpi_fill:success','cpi_attach:success','cpi_save:success']);
+  const frame=page.locator('#sb-content').contentFrame();
+  assert.equal(await frame.locator('select[name="id_pesquisador"] option:checked').innerText(),'Desk Data');
+  assert.equal(await frame.locator('#consta2').isChecked(),true);
+  await assert.rejects(driver.closeCompletedDetail(ids),/resposta não confirmada/);
+  await driver.closeDetailWithoutSaving(ids);
+  assert.equal(await modalVisible(page),false);assert.equal(posts(),0);
 }));
 
-test('CPI: 404 auxiliar conhecido não substitui nem invalida evidência positiva completa',()=>portalFixture({
-  saved:persisted()+'<div>Erro de Servidor no Aplicativo. Nao e possivel encontrar o recurso. HTTP 404. URL solicitada: /cpi_api_request.aspx</div>'
-},async({driver,pdf})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',2000),'confirmed_auxiliary_404');
+// ---------- fechamento e prova pela listagem ----------
+test('CPI: modal que não volta sozinho é fechado e a listagem confirma a resposta',()=>portalFixture({},async({driver,page,pdf})=>{
+  const refreshed=[];driver.refreshAfterSave=async(_page,done)=>{refreshed.push(done);};
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',3000),'confirmed');
+  assert.equal(await modalVisible(page),true);
+  await driver.closeCompletedDetail(ids);
+  assert.equal(await modalVisible(page),false);
+  assert.deepEqual(refreshed,[ids]);
+  await assert.rejects(driver.closeCompletedDetail(ids),/resposta não confirmada/);
 }));
 
-test('CPI: template homologado fora de h2 usa os mesmos IDs no upload e confirmação',()=>portalFixture({
-  legacy:true,saved:persisted({legacy:true})
-},async({driver,pdf,posts})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',2000),'confirmed');
-  assert.equal(posts(),1);
+test('CPI: com o portal já na lista, só a listagem é conferida',()=>portalFixture({afterSave:'list'},async({driver,pdf})=>{
+  const refreshed=[];driver.refreshAfterSave=async(_page,done)=>{refreshed.push(done);};
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',3000),'confirmed');
+  await driver.closeCompletedDetail(ids);
+  assert.deepEqual(refreshed,[ids]);
 }));
 
+test('CPI: listagem que ainda mostra a pesquisa impede liberar a próxima',()=>portalFixture({},async({driver,pdf})=>{
+  driver.refreshAfterSave=async()=>{throw new Error('A CPI não confirmou a atualização da listagem após responder.');};
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',3000),'confirmed');
+  await assert.rejects(driver.closeCompletedDetail(ids),/não confirmou a atualização/);
+}));
+
+// ---------- reconciliação (inalterada) ----------
 test('CPI: reconciliação lê resposta persistida sem POST e correlaciona o formulário aberto',()=>portalFixture({},async({driver,page,posts})=>{
  const frame=await (await page.locator('#sb-content').elementHandle()).contentFrame();
  await page.route('**/mod_tt_pesq_upd.aspx*',route=>route.fulfill({contentType:'text/html',body:persisted()}));

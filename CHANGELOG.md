@@ -32,7 +32,13 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 - O backup não trava mais a janela enquanto compacta: a compressão roda fora do processo principal e o CRC usa a implementação nativa do zlib. O formato do ZIP não mudou.
 - O histórico da aba CPI lê os registros das 100 respostas mais recentes de uma só vez, em vez de um por um a cada pesquisa concluída, e deixa de competir com as gravações do agente.
 
+### Adicionado (desenvolvimento)
+- Modo ensaio da resposta CPI (`DESKDATA_CPI_ENSAIO=1` com `npm run dev`; ignorado no instalador): preenche e anexa, cancela o diálogo de confirmação, fecha o modal sem salvar e pausa o agente após uma pesquisa.
+
 ### Corrigido
+- Resposta automática na CPI: o formulário passa a ser preenchido com os seletores reais do portal (os mesmos do projeto AGENTE_PESQUISA_FORUM_NACIONAL) e na ordem validada: Status "Respondida", espera dos radios, Pesquisador/Fonte "Desk Data", Resultado pelo rótulo, conferência, anexo do PDF, nova conferência, Alterar e OK no diálogo. A Fonte 1º não é alterada e "Permanecer nesta tela" fica desmarcado. A troca de Status que recarrega o bloco não aborta mais o preenchimento.
+- Conclusão da resposta CPI: depois do OK, basta o formulário ser deixado (retorno à lista ou nova página no modal, sem erro); o modal é fechado se não voltar sozinho e a pesquisa só conta como concluída quando some da listagem de pendentes. Login, página de erro, HTTP de erro ou alert de erro continuam como envio incerto, sem reenvio.
+- Regra de classificação CPI: a palavra "criminal" em qualquer campo de competência (Criminal, Especial Criminal, Vara Criminal…) é "Sim, Consta Restrições"; competência vazia, ausente ou não criminal é "Há Informações". Só campo de competência com tipo inválido vai para revisão. O destaque de processos criminais no PDF não mudou.
 - Testes CPI comparavam caminhos temporários não canônicos; falhavam no runner Windows (TEMP com nome 8.3).
 - Erros de lint (causa preservada em erros relançados, imports e variáveis sem uso).
 - Geração de PDF podia travar indefinidamente; agora tem timeout total de 120 s (carregamento, fontes e `printToPDF`), destrói a janela de impressão e não grava arquivo parcial.

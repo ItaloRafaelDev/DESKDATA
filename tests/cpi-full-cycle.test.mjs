@@ -226,3 +226,39 @@ test('falha no fechamento persiste pendência após reinício e impede segundo e
     assert.equal((await store.get(account,ids)).stage,'review_required');
   }finally{await rm(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
 });
+
+// ---------- modo ensaio (somente desenvolvimento) ----------
+function rehearsalServices(overrides={}){
+  const {s,events,setRecord}=services({dryRun:true,closeWithoutSaving:async()=>events.push('closed_without_saving'),...overrides});
+  setRecord({id:'123e4567-e89b-12d3-a456-426614174000',kind:'person',cpf:CPF,account:s.account,status:'ready',queryCode:'Q-AAAAAAAAAA',pdfPaths:[]});
+  return {s,events};
+}
+async function withPdf(run){
+  const {mkdtemp,writeFile,rm}=await import('node:fs/promises');const {join}=await import('node:path');
+  const dir=await mkdtemp(join(tmpdir(),'deskdata-dryrun-'));
+  try{return await run(dir,join(dir,'CPI_573987_275064_2026-11-13.pdf'),writeFile);}finally{await rm(dir,{recursive:true,force:true});}
+}
+test('ensaio: não marca submit_started, usa dry_run, fecha sem salvar e devolve dry_run',()=>withPdf(async(dir,pdfPath,writeFile)=>{
+  const modes=[];
+  const {s,events}=rehearsalServices({outputFolder:dir,
+    savePdf:async(_cpf,_id)=>{await writeFile(pdfPath,'%PDF-1.4\n'+'x'.repeat(200));s.__record.pdfPaths.push(pdfPath);},
+    uploadAndSave:async(_path,_result,mode)=>{modes.push(mode);return 'dry_run_ok';},
+    closeCompletedDetail:async()=>{throw Error('Não fechar como concluída no ensaio');}});
+  s.__record=await s.findLatest();
+  const result=await executeCpiPersonCycle(s);
+  assert.equal(result.state,'dry_run');
+  assert.match(result.message,/Ensaio concluído \(Há Informações\)/);
+  assert.deepEqual(modes,['dry_run']);
+  assert.ok(!events.includes('submit_started'));assert.ok(!events.includes('completed'));
+  assert.equal(events.at(-1),'closed_without_saving');
+  assert.equal(events.filter(e=>e==='pdf_ready').length,1);
+}));
+test('ensaio com falha antes do envio marca revisão sem fechar como concluída',()=>withPdf(async(dir,pdfPath,writeFile)=>{
+  const {s,events}=rehearsalServices({outputFolder:dir,
+    savePdf:async()=>{await writeFile(pdfPath,'%PDF-1.4\n'+'x'.repeat(200));s.__record.pdfPaths.push(pdfPath);},
+    uploadAndSave:async()=>'not_submitted'});
+  s.__record=await s.findLatest();
+  const result=await executeCpiPersonCycle(s);
+  assert.equal(result.state,'review_required');assert.ok(!events.includes('submit_started'));
+  assert.ok(!events.includes('closed_without_saving'));
+}));
