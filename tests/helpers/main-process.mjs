@@ -63,7 +63,7 @@ export async function withMainProcess(submitCpf,run,options={}){
       queryBasicCpf(cpf,onCode){return submitCpf(cpf,onCode);}
     }},
     './cpi/cpi-browser.ts':{CpiBrowser:class {
-      async close(){} status(){return {state:options.cpiOpen?'open':'closed'};}
+      async close(){if(options.cpiClose)await options.cpiClose();} status(){return {state:options.cpiOpen?'open':'closed'};}
       async filterPendingPerson29(){return options.filter?options.filter():{state:'empty',total:0,typeId:'29'};}
       async inspectPersistedPersonResponse(...args){return options.inspectPersisted?options.inspectPersisted(...args):'unavailable';}
       async inspectPendingRows(){return options.rows?options.rows():{state:'empty',total:0,visibleRows:0,rows:[],framesInspected:0,message:''};}
