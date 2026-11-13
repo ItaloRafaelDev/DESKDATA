@@ -1,20 +1,25 @@
 import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import { deflateRawSync } from 'node:zlib';
+import { promisify } from 'node:util';
+import { crc32, deflateRaw } from 'node:zlib';
 import type { QueryHistoryStore } from './query-history.ts';
 import type { CredentialProtector } from './credentials.ts';
 import type { AppSettings } from '../shared/types.ts';
 
-const crcTable=Uint32Array.from({length:256},(_,idx)=>{let c=idx;for(let i=0;i<8;i++)c=(c&1)?0xEDB88320^(c>>>1):c>>>1;return c>>>0;});
-function crc32(buf:Buffer):number{let crc=0xffffffff;for(const b of buf)crc=crcTable[(crc^b)&255]^(crc>>>8);return (crc^0xffffffff)>>>0;}
-/** Formato ZIP padrão (DEFLATE), sem dependências; armazena somente arquivos protegidos. */
-export function createZip(entries:ReadonlyArray<{name:string;data:Buffer}>):Buffer{
-  const locals:Buffer[]=[];const central:Buffer[]=[];let offset=0;
+const deflateRawAsync=promisify(deflateRaw);
+/**
+ * Formato ZIP padrão (DEFLATE), sem dependências; armazena somente arquivos protegidos.
+ * P7 (E5): a compressão roda no pool de threads do zlib e o CRC é nativo, para não travar o processo principal.
+ */
+export async function createZip(entries:ReadonlyArray<{name:string;data:Buffer}>):Promise<Buffer>{
   for(const entry of entries){
     if(!/^[a-zA-Z0-9_.-]{1,64}$/.test(entry.name))throw Error('Nome de arquivo ZIP inválido.');
     if(entry.data.length>100*1024*1024)throw Error('Arquivo excede 100 MB.');
-    const filename=Buffer.from(entry.name,'utf8');const data=deflateRawSync(entry.data);const checksum=crc32(entry.data);
+  }
+  const locals:Buffer[]=[];const central:Buffer[]=[];let offset=0;
+  for(const entry of entries){
+    const filename=Buffer.from(entry.name,'utf8');const data=await deflateRawAsync(entry.data);const checksum=crc32(entry.data);
     const header=Buffer.alloc(30);header.writeUInt32LE(0x04034b50);header.writeUInt16LE(20,4);header.writeUInt16LE(0x0800,6);header.writeUInt16LE(8,8);
     header.writeUInt32LE(checksum,14);header.writeUInt32LE(data.length,18);header.writeUInt32LE(entry.data.length,22);header.writeUInt16LE(filename.length,26);
     locals.push(header,filename,data);
@@ -53,7 +58,7 @@ export class BackupService {
       const manifest={format:'deskdata-backup-v1',createdAt,recordCount:records.length,
         files:components.map(item=>({name:item.name,size:item.data.length,sha256:createHash('sha256').update(item.data).digest('hex')})),
         note:'Dados protegidos pela conta Windows de origem. Não contém PDFs ou credenciais de login.'};
-      const data=createZip([{name:'manifest.json',data:Buffer.from(JSON.stringify(manifest,null,2))},...components]);
+      const data=await createZip([{name:'manifest.json',data:Buffer.from(JSON.stringify(manifest,null,2))},...components]);
       await mkdir(this.directory,{recursive:true});
       const filename=`DESKDATA_BACKUP_${createdAt.replace(/[:.]/g,'-')}.zip`;
       const file=join(this.directory,filename);const temp=`${file}.${randomUUID()}.tmp`;
