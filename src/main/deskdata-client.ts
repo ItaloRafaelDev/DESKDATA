@@ -1,6 +1,7 @@
 import { DATASETS } from '../shared/types.ts';
 import { readResponseLimited } from './http-response.ts';
 import { COMPANY_DATASETS } from '../shared/company-report.ts';
+import { cancellableDelay, isDeadlineError, withDeadline } from './deadline.ts';
 
 const ROOT = 'https://api.deskdata.com.br';
 interface ApiResponse { status?: {code?: number; message?: string}; data?: unknown; query?: {code?: string}; query_code?: string }
@@ -25,15 +26,29 @@ export function extractQueryCode(payload:ApiResponse):string|undefined {
   const code = payload.query_code ?? payload.query?.code;
   return typeof code === 'string' && /^Q-[A-F0-9]{10}$/.test(code) ? code : undefined;
 }
+/** Limite por requisição HTTP e prazo total do polling por código (E3). */
+export const DESKDATA_REQUEST_TIMEOUT_MS = 35_000;
+export const DESKDATA_POLL_DEADLINE_MS = 180_000;
+export interface DeskdataClientOptions { timeoutMs?: number; pollDeadlineMs?: number; now?: () => number }
+const SESSION_ENDED = 'Sessão Deskdata encerrada durante a requisição. Não repita automaticamente: a consulta pode ter sido recebida.';
+
 export class DeskdataClient {
   private token: string | null = null;
   private expiresAt = 0;
   private readonly fetcher: Fetcher;
-  private readonly sleep: (milliseconds:number)=>Promise<void>;
-  constructor(fetcher: Fetcher = fetch, sleep = (milliseconds:number)=>new Promise<void>(resolve=>setTimeout(resolve,milliseconds))) {
+  private readonly sleep: (milliseconds:number, signal?:AbortSignal)=>Promise<void>;
+  private readonly timeoutMs: number;
+  private readonly pollDeadlineMs: number;
+  private readonly now: () => number;
+  /** Abortado por `reset()` (logout, troca de conta, encerramento): cancela requisições e esperas em curso. */
+  private session = new AbortController();
+  constructor(fetcher: Fetcher = fetch, sleep: (milliseconds:number, signal?:AbortSignal)=>Promise<void> = cancellableDelay, options: DeskdataClientOptions = {}) {
     this.fetcher = fetcher; this.sleep = sleep;
+    this.timeoutMs = options.timeoutMs ?? DESKDATA_REQUEST_TIMEOUT_MS;
+    this.pollDeadlineMs = options.pollDeadlineMs ?? DESKDATA_POLL_DEADLINE_MS;
+    this.now = options.now ?? (() => Date.now());
   }
-  reset(): void { this.token = null; this.expiresAt = 0; }
+  reset(): void { this.token = null; this.expiresAt = 0; this.session.abort(); this.session = new AbortController(); }
   private validToken(): string {
     if (!this.token || Date.now() >= this.expiresAt - 60_000) {
       throw new Error('Sessão não autenticada ou expirada. Entre novamente.');
@@ -42,28 +57,37 @@ export class DeskdataClient {
   }
   private async call(method: 'GET'|'POST', path: string, body?: unknown, authorized=true): Promise<{httpStatus:number; body:ApiResponse}> {
     const token = authorized ? this.validToken() : null;
+    const session = this.session.signal;
+    if (session.aborted) throw new Error(SESSION_ENDED);
     const controller = new AbortController();
-    const timer = setTimeout(()=>controller.abort(), 35000);
+    const abort = (): void => controller.abort();
+    const timer = setTimeout(abort, this.timeoutMs);
+    session.addEventListener('abort', abort, { once: true });
     try {
-      const response = await this.fetcher(`${ROOT}${path}`, {
-        method, redirect: 'error', signal: controller.signal,
-        headers: { 'Accept': 'application/json', ...(body===undefined?{}:{'Content-Type':'application/json'}), ...(token?{'Authorization':`Bearer ${token}`}:{}) },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) })
-      });
-      const raw = await readResponseLimited(response, 8_000_000);
+      const exchange = (async () => {
+        const response = await this.fetcher(`${ROOT}${path}`, {
+          method, redirect: 'error', signal: controller.signal,
+          headers: { 'Accept': 'application/json', ...(body===undefined?{}:{'Content-Type':'application/json'}), ...(token?{'Authorization':`Bearer ${token}`}:{}) },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) })
+        });
+        return { response, raw: await readResponseLimited(response, 8_000_000) };
+      })();
+      // Mesmo um transporte que ignore o AbortSignal não prende a chamada além do prazo.
+      const { response, raw } = await withDeadline(exchange, this.timeoutMs + 1_000, 'deskdata_http', abort);
       let parsed: ApiResponse;
       try { parsed = JSON.parse(raw) as ApiResponse; } catch { throw new Error('A API não retornou JSON válido.'); }
       if (!response.ok && response.status !== 202) throw new Error(errorCode(parsed, response.status));
       return {httpStatus:response.status, body:parsed};
     } catch (err) {
+      if (session.aborted) throw new Error(SESSION_ENDED, { cause: err });
       if (path === '/queries' && err instanceof TypeError) {
         throw new Error('Falha de rede durante a consulta. A requisição pode ter sido recebida: não repita automaticamente.', { cause: err });
       }
-      if ((err as Error).name === 'AbortError') {
+      if ((err as Error).name === 'AbortError' || isDeadlineError(err)) {
         throw new Error('Tempo limite de resposta. Não repita automaticamente: a consulta pode ter sido recebida e cobrada.', { cause: err });
       }
       throw err;
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); session.removeEventListener('abort', abort); }
   }
   async authenticate(username: string, password: string): Promise<void> {
     if (username.trim().length < 3 || !password) throw new Error('Informe e-mail e senha da plataforma.');
@@ -87,9 +111,16 @@ export class DeskdataClient {
     }
     return balance;
   }
+  /**
+   * Polling por GET (nunca POST): no máximo 24 tentativas e prazo total de `pollDeadlineMs`; a espera entre
+   * tentativas é cancelada por `reset()`. Ao esgotar, o código continua recuperável depois por GET.
+   */
   private async awaitResult(code:string):Promise<{payload:unknown;queryCode:string}>{
-    for (let attempt=0;attempt<24;attempt++) {
-      await this.sleep(5000);
+    const session = this.session.signal;
+    const deadline = this.now() + this.pollDeadlineMs;
+    for (let attempt=0;attempt<24 && this.now()+5000<=deadline;attempt++) {
+      await this.sleep(5000, session);
+      if (session.aborted) throw new Error(SESSION_ENDED);
       const polled = await this.call('GET',`/queries/${encodeURIComponent(code)}`);
       if (polled.httpStatus === 200 && polled.body.status?.code === 4000) return {payload:polled.body,queryCode:code};
       if (polled.httpStatus !== 202 || polled.body.status?.code !== 4008) throw new Error(errorCode(polled.body,polled.httpStatus));

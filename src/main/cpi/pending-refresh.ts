@@ -1,6 +1,7 @@
 import type { Frame, Page } from 'playwright-core';
 import { CPI_PENDING_URL, readListingCount } from './pending-filter.ts';
 import { inspectPendingPerson29Rows, validateCpiRowId, type CpiPendingRowId, type CpiPendingRowsInspection } from './pending-rows.ts';
+import { throwIfAborted } from '../deadline.ts';
 
 const CPI_HOST = 'adm.cpicentral.com.br';
 
@@ -29,7 +30,8 @@ function isCpiFrame(frame: Frame): boolean {
 export async function refreshPendingAfterConfirmedSave(
   page: Page,
   completed: CpiPendingRowId,
-  timeoutMs = 20000
+  timeoutMs = 20000,
+  signal?: AbortSignal
 ): Promise<void> {
   if (!validateCpiRowId(completed)) throw new Error('Identificadores da pesquisa concluída são inválidos.');
   const url = new URL(page.url());
@@ -40,6 +42,7 @@ export async function refreshPendingAfterConfirmedSave(
   let showAll: import('playwright-core').Locator | null = null;
   const controlDeadline = Date.now() + 8000;
   while (Date.now() < controlDeadline && !showAll) {
+    throwIfAborted(signal, 'cpi_close_detail');
     for (const frame of page.frames().filter(isCpiFrame)) {
       const options = frame.locator('[title="Mostrar Tudo"]');
       if (await options.count().catch(() => 0) !== 1) continue;
@@ -48,15 +51,17 @@ export async function refreshPendingAfterConfirmedSave(
     if (!showAll) await page.waitForTimeout(200);
   }
   if (!showAll) throw new Error('A listagem CPI não retornou após o fechamento da resposta.');
+  throwIfAborted(signal, 'cpi_close_detail');
   await showAll.click({ timeout: 10000 });
 
   const deadline = Date.now() + timeoutMs;
   let previousSignature = '';
   let stableReads = 0;
   while (Date.now() < deadline) {
+    throwIfAborted(signal, 'cpi_close_detail');
     // A CPI pode manter temporariamente o rodapé da listagem anterior.
     // Exigir leitura completa dos IDs, não apenas um total positivo.
-    const total = await readListingCount(page, 700);
+    const total = await readListingCount(page, 700, signal);
     if (total !== null) {
       const inspected = await inspectPendingPerson29Rows(page, total);
       if (isPostSaveListingReady(total, inspected, completed)) {

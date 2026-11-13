@@ -24,6 +24,8 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 - Consulta Deskdata ainda em processamento no ciclo CPI: um único GET por ciclo (sem polling de até 16 min com o detalhe aberto); a pesquisa é retomada depois por GET, sem novo POST.
 - A tela do agente mostra a pesquisa atual (somente os códigos CPI), a duração do ciclo e os contadores da sessão (concluídas, em revisão, falhas, ciclos).
 - A fila CPI protegida é lida uma vez por varredura e mantida em cache na memória, invalidado quando o arquivo muda.
+- A escolha da pasta dos PDFs não bloqueia mais as outras operações enquanto o diálogo está aberto. Se a sessão mudar ou o aplicativo começar a encerrar, nada é gravado.
+- Sem resposta em 2 min, a confirmação da limpeza local fecha sozinha e vale "Cancelar". O mesmo acontece ao encerrar o aplicativo.
 
 ### Corrigido
 - Testes CPI comparavam caminhos temporários não canônicos; falhavam no runner Windows (TEMP com nome 8.3).
@@ -31,6 +33,11 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 - Geração de PDF podia travar indefinidamente; agora tem timeout total de 120 s (carregamento, fontes e `printToPDF`), destrói a janela de impressão e não grava arquivo parcial.
 - Limpeza parcial de PDFs expunha na mensagem de erro o caminho do arquivo (que contém o CPF); agora a mensagem é genérica e mantém a contagem de PDFs excluídos.
 - Marcadores de conflito de merge que tinham ficado neste CHANGELOG.
+- Esperas externas sem limite podiam travar o agente. Cada operação CPI agora tem um prazo total: abrir, focar e fechar o navegador; filtro 29; leitura das linhas; abrir o detalhe; preencher, anexar e salvar; fechar o detalhe; reconciliar. Fechar o navegador ou sair da conta cancela a operação em curso na hora. Depois do prazo, a operação abandonada não clica nem grava estado.
+- Prazo estourado ou cancelamento depois de anexar o PDF vira "envio sem confirmação" (verificação manual) e nunca reenvia. Antes do anexo, vira revisão sem nenhum envio.
+- Deskdata: sair da conta cancela a requisição e o polling em curso; a mensagem pede para não repetir a consulta. O polling por código tem prazo total de 3 min (no máximo 24 tentativas, só GET). Mesmo um transporte que ignore o cancelamento não passa do prazo da requisição.
+- Gravar o PDF ou conferir o PDF antes do anexo, numa pasta que não responde (ex.: unidade de rede), falha em 30 s. Nesse caso o caminho não é registrado e nada é anexado.
+- Parar o monitor CPI com uma leitura presa termina dentro do prazo do filtro.
 
 ### Removido
 - Arquivos do pnpm (`pnpm-lock.yaml`, `pnpm-workspace.yaml`); o projeto usa somente npm.

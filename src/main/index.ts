@@ -30,7 +30,8 @@ import { assertRecoveredCpf } from '../shared/query-identity.ts';
 import { PersonReportService, type ReceivedPersonQuery } from './person-reports.ts';
 import type { QueryOutcome, QueryExecution, QueryUpdate, PisQueryExecution, NormalizedData } from '../shared/types.ts';
 import { DeskdataClient } from './deskdata-client.ts';
-import { chooseFolder, getSettings } from './settings.ts';
+import { getSettings, pickOutputFolder, saveOutputFolder } from './settings.ts';
+import { DialogGuard } from './dialog-guard.ts';
 import { saveCompanyReportPdf, saveCpiReportPdf, saveReportPdf, savePisReportPdf } from './pdf.ts';
 import { normalizeDeskdataResponse } from '../shared/normalizer.ts';
 import { resolvePisOutcome } from './pis-outcome.ts';
@@ -48,10 +49,12 @@ const operations=new ApplicationOperations();
 const exclusiveChannels=new Set([
   'api:query','pis:query','company:query','queries:resume','history:recover-code',
   'history:regenerate','pis:regenerate','company:regenerate','report:reprocess','report:save-again',
-  'maintenance:clean','backup:create','auth:login','auth:logout','settings:choose-folder',
+  'maintenance:clean','backup:create','auth:login','auth:logout',
   'cpi:open','cpi:inspect','cpi:filter-person-29','cpi:rows:inspect','cpi:details:inspect',
   'cpi:person:history','cpi:person:prepare','cpi:workflow:verify','cpi:close'
 ]);
+const dialogs=new DialogGuard();
+let folderDialogOpen=false;
 const cpiBrowser=new CpiBrowser();
 const cpiMonitor=new CpiPendingMonitor(
   () => operations.run(()=>cpiBrowser.filterPendingPerson29(),true),
@@ -562,7 +565,19 @@ if(instanceLock)app.whenReady().then(()=>{
   });
   session.defaultSession.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));
   bind('settings:get',()=>viewSettings());
-  bind('settings:choose-folder',async()=>{account();await chooseFolder();return viewSettings();});
+  // Fora do bloqueio exclusivo (W25): a espera humana não impede o FULL AUTO nem o encerramento.
+  bind('settings:choose-folder',async()=>{
+    const who=account();
+    if(folderDialogOpen)throw new Error('A seleção de pasta já está aberta.');
+    folderDialogOpen=true;
+    try{
+      const chosen=await dialogs.untilShutdown(pickOutputFolder());
+      operations.assertAccepting();
+      if(account()!==who)throw new Error('A sessão mudou durante a seleção de pasta. Nada foi alterado.');
+      if(chosen)await saveOutputFolder(chosen);
+    }finally{folderDialogOpen=false;}
+    return viewSettings();
+  });
   bind<[boolean]>('settings:approve',async approved=>{
     const who=account();
     if(typeof approved!=='boolean')throw new Error('Valor inválido.');
@@ -607,14 +622,15 @@ if(instanceLock)app.whenReady().then(()=>{
         summary.pendingCount?`Existem ${summary.pendingCount} consulta(s) pendentes ou incertas no histórico.`:'',
         'A exclusão não remove consultas da Deskdata e não pode ser desfeita pelo aplicativo.'
       ].filter(Boolean).join('\n\n');
-      const answer=await dialog.showMessageBox(mainWindow,{
+      // W24: sem resposta em 120 s ou com o aplicativo encerrando, o diálogo fecha e vale "Cancelar".
+      const confirmed=await dialogs.confirm(signal=>dialog.showMessageBox(mainWindow,{
         type:'warning',title:'Confirmar limpeza local',message:'Deseja excluir os dados selecionados?',detail:explanation,
-        buttons:['Cancelar','Excluir definitivamente'],defaultId:0,cancelId:0,noLink:true
-      });
+        buttons:['Cancelar','Excluir definitivamente'],defaultId:0,cancelId:0,noLink:true,signal
+      }),1);
       operations.assertAccepting();
       account();
       if(cpiAuto.isActive()||cpiMonitor.isActive())throw new Error('Pause a automação CPI antes de executar a limpeza.');
-      if(answer.response!==1)return {cancelled:true,deletedPdfs:0,missingPdfs:0,deletedRecords:0};
+      if(!confirmed)return {cancelled:true,deletedPdfs:0,missingPdfs:0,deletedRecords:0};
       const result=await maintenance.clean(selection);
       personReports.clear();lastSavedPdf=null;
       lastCompanyResponse=null;lastPisResponse=null;
@@ -843,6 +859,7 @@ app.on('before-quit',event=>{
   if(shutdownRequested)return;
   shutdownRequested=true;
   operations.stopAccepting();
+  dialogs.cancelAll();
   monitor?.stopAll();
   // Interromper novos agendamentos agora, preservando o ciclo e a sessão em curso.
   const stopping=[cpiAuto?.pause(),cpiMonitor.stopAndWait()];
