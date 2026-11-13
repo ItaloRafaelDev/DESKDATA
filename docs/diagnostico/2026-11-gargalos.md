@@ -44,7 +44,7 @@ se o script da página ou o Edge parar de responder, a espera não termina.
 | W20 | `src/main/cpi/pending-filter.ts:29-39`, `:63-81` | `visibleControl` (12 s) e `readListingCount` (25 s) | prazo por laço; `frame.evaluate` interno sem limite | travamento | média | **resolvido** (E3): coberto por `cpi_filter` (150 s); sinal conferido em cada iteração. `e3-timeouts` — "E3/W20/W21: filtro 29 com frame que não responde…" |
 | W21 | `src/main/cpi/pending-filter.ts:92-127` | filtro 29: `goto` (30 s), cliques (10–15 s), `getAttribute`/`isChecked` (padrão 30 s), `evaluateAll` | `evaluateAll` sem limite | travamento | baixa | **resolvido** (E3): `cpi_filter`; nenhum clique depois do prazo. `e3-timeouts` — "E3/W20/W21: filtro 29 com frame que não responde…" |
 | W22 | `src/main/cpi/pending-rows.ts:63-71` | leitura de linhas: `frame.evaluate` por frame | nenhum | travamento | média | **resolvido** (E3): `cpi_rows` (30 s). `e3-timeouts` — "E3/W22/L8: leitura das linhas…" |
-| W23 | `src/main/cpi/cpi-browser.ts:79` | inspeção de controles (diagnóstico manual): `evaluateAll` | nenhum | travamento | baixa | **resolvido** (E3): `cpi_inspect` (20 s); canal de desenvolvimento segue para E5. |
+| W23 | `src/main/cpi/cpi-browser.ts:79` | inspeção de controles (diagnóstico manual): `evaluateAll` | nenhum | travamento | baixa | **resolvido** (E3): `cpi_inspect` (20 s). **E5:** `cpi:inspect` está em `DEV_ONLY_INVOKE` e não é registrado no aplicativo instalado. `ipc-contract-e5` — "binder ignora canais de inspeção…" e "processo principal real registra inspeção…". |
 | W24 | `src/main/index.ts:581` | `dialog.showMessageBox` da limpeza, com operação exclusiva, `busy` e `maintenanceActive` presos | espera humana sem limite; o encerramento falha após 60 s com o diálogo aberto | travamento | baixa | **resolvido** (E3): `DialogGuard`: diálogo fecha em 120 s ou no encerramento e vale "Cancelar". `e3-timeouts` — "E3/W24: limpeza com diálogo sem resposta…" |
 | W25 | `src/main/settings.ts:22` (via `index.ts:536`) | `dialog.showOpenDialog` dentro de operação exclusiva | espera humana sem limite | travamento | baixa | **resolvido** (E3): fora do bloqueio exclusivo, reentrada bloqueada, resultado descartado no encerramento. `e3-timeouts` — "E3/W25: seleção de pasta não prende…" |
 | W26 | `src/main/index.ts:816-820` | encerramento: `waitForIdle` (60 s) e `history.close()` | `history.close` sem limite (aguarda a fila do SQLite) | travamento | baixa | aceito (baixo): só aguarda operações locais já aceitas; preferir esperar a perder escrita |
@@ -98,12 +98,12 @@ uma espera sem limite (seção 1) ou que contradiz D1.
 |---|---|---|---|---|---|---|
 | P1 | `src/main/cpi/workflow-store.ts:61-84`, `:109-112` | cada `get`/`claim`/`mark` lê, decifra (DPAPI) e valida o arquivo inteiro (até 10.000 itens); cada `mark` regrava tudo | O(n) por operação | desempenho | média | **resolvido na E2**: cache em memória validado por tamanho e mtime do arquivo; decifra só quando o arquivo muda; cada `mark` ainda regrava o arquivo (atomicidade preservada) |
 | P2 | `src/main/index.ts:112-120` | seleção do item: até 100 `cpiWorkflow.get` por varredura, cada um com P1 | O(100 × n) por ciclo | desempenho | média | **resolvido na E2**: `cpiWorkflow.stages()` lê a fila uma vez por varredura |
-| P3 | `src/main/query-history.ts:167-174` | `list`/`listAll` decifram todas as linhas; usados no login (`index.ts:263`), na limpeza e no backup | O(histórico) | desempenho | baixa | E5 |
+| P3 | `src/main/query-history.ts:167-174` | `list`/`listAll` decifram todas as linhas; usados no login (`index.ts:263`), na limpeza e no backup | O(histórico) | desempenho | baixa | aceito (baixo, decisão do responsável na E5): uma vez por login e em ações manuais (limpeza, backup), fora do FULL AUTO; decifragem em paralelo dentro de um único bloqueio |
 | P4 | `src/main/query-history.ts:238-248` | `removePdfReferences` decifra e recifra todas as linhas | O(histórico) | desempenho | baixa | aceito (baixo): só na limpeza manual |
 | P5 | `src/main/query-history.ts:92-101` | `new DatabaseSync` e `PRAGMA integrity_check` síncronos na inicialização | O(tamanho do banco), uma vez | desempenho | baixa | aceito (baixo): só na primeira operação; garante integridade antes de consultas pagas |
 | P6 | `src/main/query-history.ts:160-196` | `DatabaseSync` (`prepare`/`get`/`run`) síncrono no processo principal | por consulta, com índice | desempenho | baixa | aceito (baixo): consultas indexadas e pontuais; nenhuma em laço no FULL AUTO |
-| P7 | `src/main/backup.ts:10`, `:17` | `crc32` em JS byte a byte e `deflateRawSync` do snapshot inteiro (até 100 MB) | bloqueia a interface durante o backup | desempenho | média | E5 |
-| P8 | `src/main/index.ts:600-617` | `cpi:history:list`: decifra a fila inteira, até 100 `findById` e `stat`; chamado a cada mudança de `processed` (`renderer/main.tsx:298-302`) | O(n) por item processado | desempenho | média | **parcial na E2**: a fila CPI vem do cache (P1); os `findById`/`stat` do histórico seguem (E5) |
+| P7 | `src/main/backup.ts:10`, `:17` | `crc32` em JS byte a byte e `deflateRawSync` do snapshot inteiro (até 100 MB) | bloqueia a interface durante o backup | desempenho | média | **resolvido** (E5): `createZip` assíncrono, `deflateRaw` no pool de threads do zlib e `zlib.crc32` nativo. `backup` — "P7: createZip é assíncrono, mantém o laço de eventos livre…" |
+| P8 | `src/main/index.ts:600-617` | `cpi:history:list`: decifra a fila inteira, até 100 `findById` e `stat`; chamado a cada mudança de `processed` (`renderer/main.tsx:298-302`) | O(n) por item processado | desempenho | média | **parcial na E2**: a fila CPI vem do cache (P1); os `findById`/`stat` do histórico seguem (E5). **Resolvido na E5:** `cpi/history-overview.ts` lê os registros em lote (`findManyById`, um bloqueio e um `SELECT … IN`); `cpi-history-overview` — "P8: visão do histórico CPI com 100 concluídas…" |
 | P9 | `src/main/diagnostics.ts:23-37` | cada evento faz `mkdir`, `stat`, `appendFile`, `readdir` e `stat` de todos os logs | ~6 operações de disco por evento; a Etapa 0 adiciona ~15 eventos por ciclo | desempenho | baixa | aceito (baixo): fila serial assíncrona, ≤ 6 arquivos; não bloqueia o ciclo (gravação sem `await` no ciclo) |
 | P10 | `src/main/index.ts:497` | `mkdirSync` da pasta de dados | uma vez, antes da janela | desempenho | — | aceito (baixo) |
 | P11 | `src/main/settings.ts:8-16` | `getSettings` lê `settings.json` a cada chamada | arquivo pequeno | desempenho | — | aceito (baixo) |
@@ -165,9 +165,9 @@ real foi executada; a medição foi comprovada com fakes nos testes.
 | E2 | L1, L2, L3, L4, C8, C9, P1, P2, P8, Q1, Q2 |
 | E3 | W1–W4, W6, W8–W16, W18–W25, L3, L7, L8 |
 | E4 | C1–C7, C10, C11 |
-| E5 | P3, P7 (e o canal de inspeção de W23) |
+| E5 | P7, P8 (restante), canal de inspeção de W23; P3 aceito |
 | Resolvido | W5 (PR #12), L9 (E1) |
-| Aceito (baixo) | W7, W17, W26–W29, L5, L6, L10–L13, C12, C13, P4–P6, P9–P11, Q3 |
+| Aceito (baixo) | W7, W17, W26–W29, L5, L6, L10–L13, C12, C13, P3–P6, P9–P11, Q3 |
 
 Prioridade sugerida pela severidade: L2 e L3 (fila bloqueada por um item e `fetchByCode` longo dentro do
 ciclo) e W2/W3 (polling de ≈ 16 min sem cancelamento) são os principais candidatos a "travamento" do FULL AUTO.
