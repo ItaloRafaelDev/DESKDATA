@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ApplicationOperations, settleWithin } from '../src/main/operations.ts';
+import { OperationGate as ApplicationOperations, settleWithin } from '../src/main/operation-gate.ts';
 
 function deferred(){let resolve;const promise=new Promise(r=>{resolve=r;});return {promise,resolve};}
 

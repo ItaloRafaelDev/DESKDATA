@@ -32,13 +32,13 @@ export async function withMainProcess(submitCpf,run,options={}){
     safeStorage:{isAsyncEncryptionAvailable:async()=>true,encryptStringAsync:async s=>Buffer.from(s),
       decryptStringAsync:async b=>({result:b.toString(),shouldReEncrypt:false})},
     session:{defaultSession:{setPermissionRequestHandler:()=>{}}},
-    dialog:{showMessageBox:options.showMessageBox??(async()=>({response:0}))},shell:{}
+    dialog:{showMessageBox:options.showMessageBox??(async()=>({response:0}))},shell:options.openPath?{openPath:options.openPath}:{}
   };
   const stubs={
     electron,
-    ...(options.shutdownTimeoutMs?{'./operations.ts':{
-      ...localRequire('./operations.ts'),
-      ApplicationOperations:class extends localRequire('./operations.ts').ApplicationOperations {
+    ...(options.shutdownTimeoutMs?{'./operation-gate.ts':{
+      ...localRequire('./operation-gate.ts'),
+      OperationGate:class extends localRequire('./operation-gate.ts').OperationGate {
         waitForIdle(additional){return super.waitForIdle(additional,options.shutdownTimeoutMs);}
       }
     }}:{}),
@@ -63,7 +63,7 @@ export async function withMainProcess(submitCpf,run,options={}){
       queryBasicCpf(cpf,onCode){return submitCpf(cpf,onCode);}
     }},
     './cpi/cpi-browser.ts':{CpiBrowser:class {
-      async close(){} status(){return {state:options.cpiOpen?'open':'closed'};}
+      async close(){if(options.cpiClose)await options.cpiClose();} status(){return {state:options.cpiOpen?'open':'closed'};}
       async filterPendingPerson29(){return options.filter?options.filter():{state:'empty',total:0,typeId:'29'};}
       async inspectPersistedPersonResponse(...args){return options.inspectPersisted?options.inspectPersisted(...args):'unavailable';}
       async inspectPendingRows(){return options.rows?options.rows():{state:'empty',total:0,visibleRows:0,rows:[],framesInspected:0,message:''};}
@@ -71,6 +71,7 @@ export async function withMainProcess(submitCpf,run,options={}){
       readValidatedCpf(ids){if(options.readCpf)return options.readCpf(ids);throw new Error('CPF ausente ou inválido no formulário da CPI.');}
     }},
     './pending-queries.ts':{PendingQueryMonitor:class {
+      constructor(deps){options.onPendingMonitor?.(deps);}
       tasks=new Set();stopAll(){this.tasks.clear();}isWatching(id){return this.tasks.has(id);}watch(target){events.push('query_watch');this.tasks.add(target.id);}
     }},
     './settings.ts':{getSettings:async()=>options.getSettings?options.getSettings(root):({outputFolder:root,paidQueriesApproved:false}),
