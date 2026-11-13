@@ -16,9 +16,41 @@ São preservados os títulos com/sem `da`, os separadores conhecidos e a leitura
 A Shadowbox ativa tem prioridade. Frames de outras pesquisas, frames substituídos
 e títulos ambíguos não fornecem evidência para o envio atual.
 
-## Regra de conclusão
+## Regra de conclusão (v0.2, E6 — DOM real do portal)
 
-`completed` só é gravado após o adaptador confirmar, em conjunto:
+A captura do DOM real feita na E6 (13/11) mostrou que o portal não tem `__doPostBack` nem formulário associado
+aos campos (`form: null`). O "Alterar" é um link de texto (`<a href="javascript://" onclick="upd_pesq()">`), Status e
+Resultado chamam só funções locais (`change_status`, `change_consta`) e o portal não devolve uma página com os
+campos persistidos depois de salvar. Por isso a regra de conclusão do envio passou a ser:
+
+1. cabeçalho do modal (solicitação e pesquisa) e CPF conferidos antes de preencher e revalidados a cada passo;
+2. `id_pesquisador` e `id_pesquisador_prim` = Desk Data; `id_pesq_status` = Respondida; o radio de resultado
+   (`#consta2` "Há Informações" ou `#consta3` "Sim, Consta Restrições") e `#MainPage_FileUpload1` visíveis no prazo;
+3. radio marcado e conferido; arquivo anexado e conferido (`files[0].name` = nome do PDF `CPI_` do item);
+   `#stay` desmarcado; `textarea#resposta` nunca é preenchido; "Nada Consta" nunca é automático;
+4. `submit_started` gravado antes do clique (sem checkpoint gravado, não há clique);
+5. o confirm nativo só é aceito com o texto "Deseja Realmente Alterar esta Pesquisa?" e `Resultado >>> <rótulo>`
+   do resultado escolhido. Texto divergente é cancelado (`upd_pesq` não envia): `confirm_mismatch` →
+   `review_required` ("confirmação divergente") e o modal é fechado sem salvar;
+6. depois do clique, o modal (`#sb-container` com o iframe `#sb-content`) fecha no prazo;
+7. a listagem aguardando é atualizada e nenhum checkbox `#pesq_N` tem valor terminado em `;<solicitação>;<pesquisa>`.
+   Só então o item vira `completed`.
+
+Modal que não fecha (6) ou item que continua listado (7) → `verification_required` e o FULL AUTO pausa na hora,
+sem reenvio. Alert do portal depois do clique também é resultado incerto.
+
+Antes do clique, XHR/fetch do portal não é falha: o diagnóstico registra só método e caminho (sem query string,
+sem IDs longos). Só a navegação ou recarga do iframe `#sb-content` é falha (`CpiFrameReloadError`): o modal é
+fechado sem salvar e o item continua em `pdf_ready`.
+
+As regras de evidência persistida abaixo (fonte, data, Documento PDF, IDs exatos na página) **continuam valendo
+apenas para a reconciliação manual** (`inspectPersistedPersonResponse`), que reabre a pesquisa por GET sem salvar.
+
+## Regra de evidência persistida (reconciliação)
+
+Na reconciliação, a pesquisa só é dada como respondida quando se confirma, em conjunto:
+(os itens 2 a 5 descrevem o envio antigo por formulário e ficam como registro histórico; a reconciliação usa
+os itens 1 e 6)
 
 1. CPF e IDs conferidos antes do preenchimento e IDs/CPF revalidados antes de salvar;
 2. anexo e botão Alterar vinculados ao mesmo formulário;
@@ -62,17 +94,18 @@ O workflow grava `pdf_ready` antes de chamar o adaptador. **Desde a v0.2 (E6, fi
 `submit_started` é gravado pelo adaptador (`beforeSubmit`) depois do anexo conferido e imediatamente antes do
 clique em "Alterar"; sem o checkpoint gravado não há clique. As regras abaixo foram ajustadas a esse ponto.
 
-- `not_submitted`: falha antes do clique em "Alterar", sem POST ou navegação do portal observados. O modal é
-  fechado sem salvar e o item permanece em `pdf_ready`: é reprocessado depois (adiado em memória) com o MESMO PDF
-  e a mesma classificação, sem POST, sem GET e sem regerar o PDF. 3 seguidas pausam o agente (`submit_not_sent`).
-- `not_submitted_postback`: o portal fez POST ou navegação no frame antes do clique (o agente não salvou nada, mas
-  o formulário pode ter sido enviado pelo próprio portal). Modal fechado sem salvar e item em `review_required`;
-  nunca reprocessado automaticamente.
+- `not_submitted`: falha antes do clique em "Alterar" (campo ausente, radio ou anexo não confirmados, recarga do
+  iframe `#sb-content`, identidade alterada). O modal é fechado sem salvar (`a#sb-nav-close`) e o item permanece em
+  `pdf_ready`: é reprocessado depois (adiado em memória) com o MESMO PDF e a mesma classificação, sem POST, sem GET
+  e sem regerar o PDF. 3 seguidas pausam o agente (`submit_not_sent`).
+- XHR/fetch do portal antes do clique não é falha (só método e caminho no diagnóstico, evento `cpi_portal_request`).
+- `confirm_mismatch`: texto do confirm divergente; cancelado, nada enviado. Modal fechado sem salvar e item em
+  `review_required` ("confirmação divergente"); nunca reprocessado automaticamente.
 - Depois do checkpoint (`submit_started`), qualquer falha é `unverified` → `verification_required`. O modal é
   mantido aberto para a verificação manual e o FULL AUTO pausa na hora.
 - Se o modal não fechar sem salvar, o portal fica bloqueado: parada sistêmica (`portal_layout`).
 - O motivo de cada falha antes do clique vai ao diagnóstico como `errorType` de lista fixa
-  (`CpiEarlyPostbackError`, `CpiFileInputError`, `CpiSaveButtonError`, `CpiFormActionError`, ...).
+  (`CpiFrameReloadError`, `CpiResultRadioError`, `CpiFileInputError`, `CpiAttachRejectedError`, `CpiSaveButtonError`, ...).
 - Exceção não classificada após o checkpoint também grava `verification_required`.
 - Se houver interrupção antes dessa gravação, `submit_started` permanece bloqueante.
 
