@@ -33,6 +33,9 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 - O histórico da aba CPI lê os registros das 100 respostas mais recentes de uma só vez, em vez de um por um a cada pesquisa concluída, e deixa de competir com as gravações do agente.
 
 ### Corrigido
+- CPI (validação real, pesquisa 542685/277705): uma falha antes do clique em "Alterar" ia para "envio sem confirmação" (verificação manual) e deixava o modal aberto; os ciclos seguintes falhavam no filtro. Agora o ponto de não retorno é gravado imediatamente antes do clique. Uma falha anterior fecha o modal sem salvar e a pesquisa é reprocessada depois com o mesmo PDF, sem nova consulta. Se o próprio portal enviou o formulário antes do clique, a pesquisa vai para revisão manual. "Envio sem confirmação" fica só para falhas depois do clique e pausa o agente na hora, com a pesquisa indicada na tela.
+- 3 falhas seguidas antes do clique em "Alterar" pausam o agente. Um modal que não fecha sem salvar pausa na hora (portal bloqueado).
+- O diagnóstico passa a registrar o motivo fixo da falha no preenchimento (sem dados da pesquisa) e o nome dos canais com três partes (ex.: pausar o agente).
 - Testes CPI comparavam caminhos temporários não canônicos; falhavam no runner Windows (TEMP com nome 8.3).
 - Erros de lint (causa preservada em erros relançados, imports e variáveis sem uso).
 - Geração de PDF podia travar indefinidamente; agora tem timeout total de 120 s (carregamento, fontes e `printToPDF`), destrói a janela de impressão e não grava arquivo parcial.

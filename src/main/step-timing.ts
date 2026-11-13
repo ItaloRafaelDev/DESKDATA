@@ -3,10 +3,10 @@ import { randomUUID } from 'node:crypto';
 /** Somente nomes fixos chegam ao diagnóstico: nenhum CPF, CNPJ, nome, caminho ou código de consulta. */
 export const TIMED_FLOWS=['cpi','person','pis','company'] as const;
 export const TIMED_STEPS=[
-  'cpi_filter','cpi_rows','cpi_select','cpi_open_detail','cpi_read_cpf','cpi_fill','cpi_attach','cpi_save','cpi_close_detail',
+  'cpi_filter','cpi_rows','cpi_select','cpi_open_detail','cpi_read_cpf','cpi_fill','cpi_attach','cpi_save','cpi_close_detail','cpi_close_unsaved',
   'deskdata_credits','deskdata_query','deskdata_fetch','report_pdf'
 ] as const;
-export const TIMED_OUTCOMES=['completed','verification_required','review_required','pending','ready','no_pis','empty','idle','item_failed'] as const;
+export const TIMED_OUTCOMES=['completed','verification_required','review_required','not_submitted','pending','ready','no_pis','empty','idle','item_failed'] as const;
 export type TimedFlow=typeof TIMED_FLOWS[number];
 export type TimedStep=typeof TIMED_STEPS[number];
 export type TimedOutcome=typeof TIMED_OUTCOMES[number];

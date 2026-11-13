@@ -57,7 +57,8 @@ async function cpiScanOneTimed(ctx: MainContext, timer: StepTimer, context: CpiS
     cpiQueue.release(target);
     return { kind: 'item_failed', found, ids: target, failure, message: safeCpiCycleError(error) };
   }
-  if (result.state === 'pending') cpiQueue.defer(target); else cpiQueue.release(target);
+  // Adiados em memória: Deskdata ainda em 202, ou falha antes do clique (reprocessa depois com o mesmo PDF, sem POST).
+  if (result.state === 'pending' || result.state === 'not_submitted') cpiQueue.defer(target); else cpiQueue.release(target);
   if (ctx.session.account !== who) throw new Error('Conta Deskdata alterada durante o processamento CPI.');
   return { kind: 'item', found, outcome: result };
 }
@@ -84,11 +85,16 @@ function cpiProcessItem(ctx: MainContext, timer: StepTimer, who: string, target:
     submitCpf: (cpf, onCode) => client.submitCpf(cpf, onCode),
     checkByCode: code => client.checkByCode(code),
     savePdf: (cpf, recordId, code, data) => saveCpiPdf(ctx, who, target, outputFolder, cpf, recordId, code, data),
-    uploadAndSave: async (pdf, result) => {
+    uploadAndSave: async (pdf, result, beforeSubmit) => {
       if (ctx.session.account !== who) throw new Error('Conta Deskdata alterada durante o processamento CPI.');
-      return cpiBrowser.uploadAndSavePersonResponse(target, pdf, result, undefined, timer);
+      return cpiBrowser.uploadAndSavePersonResponse(target, pdf, result, undefined, timer, async () => {
+        // Troca de conta entre o preenchimento e o clique: nenhum clique (o checkpoint não é gravado).
+        if (ctx.session.account !== who) throw new Error('Conta Deskdata alterada durante o processamento CPI.');
+        await beforeSubmit();
+      });
     },
-    closeCompletedDetail: () => cpiBrowser.closeCompletedDetail(target)
+    closeCompletedDetail: () => cpiBrowser.closeCompletedDetail(target),
+    closeUnsavedDetail: () => cpiBrowser.closeUnsavedDetail(target)
   });
 }
 /** Gera o PDF CPI_<pesquisaId>_<solicitacaoId>_<data>.pdf e o registra na consulta, conferindo conta, CPF e código. */

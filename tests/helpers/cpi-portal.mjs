@@ -66,7 +66,8 @@ export async function portalFixture(options,run){
   driver.browser=browser;driver.page=page;driver.lastMappedRows=[ids];
   try{
     await page.goto(`${origin}/fixture-list`);
-    await page.locator('#sb-content').contentFrame().locator('input[type="file"]').waitFor();
+    // `attached`: o portal pode manter o input de arquivo oculto (H-b, E6).
+    await page.locator('#sb-content').contentFrame().locator('input[type="file"]').waitFor({state:'attached'});
     await driver.inspectPendingPersonDetails(ids);
     await run({driver,page,pdf,posts:()=>posts,body:()=>postedBody,attachedFile:()=>attachedFile});
   }finally{await context.close();await browser.close();await rm(dir,{recursive:true,force:true,maxRetries:3,retryDelay:100});}

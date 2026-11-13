@@ -111,13 +111,16 @@ test('falhas de item da mesma classe também contam: 3 seguidas pausam sem abrir
   assert.equal(run.status().counters.review,3);
 });
 
-test('3 envios sem confirmação seguidos pausam o agente (sem reenvio)',async()=>{
+// E6 (fix/v02-validacao-anexo-pdf): o envio incerto mantém o modal aberto para a verificação manual; nenhum ciclo
+// seguinte consegue ler a listagem. Antes eram 3 ocorrências; agora a primeira já pausa (sem reenvio).
+test('envio sem confirmação pausa o agente na primeira ocorrência (sem reenvio)',async()=>{
   let calls=0;const clock=virtualClock();
   const run=runnerWith(async()=>({kind:'item',found:9,outcome:outcome(++calls,'verification_required')}),clock);
   await run.start(300);
   while(run.isActive())await nextTurn();
-  assert.equal(calls,3);
-  assert.deepEqual(run.status().failureStreak,{kind:'submit_unverified',count:3});
+  assert.equal(calls,1);
+  assert.deepEqual(run.status().failureStreak,{kind:'submit_unverified',count:1});
+  assert.equal(run.status().phase,'error');
 });
 
 for(const message of ['Saldo Deskdata zerado; automação pausada até haver créditos disponíveis.',

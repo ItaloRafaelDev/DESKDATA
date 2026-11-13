@@ -6,7 +6,7 @@
  * - Demais classes: o item vai para revisão e o agente segue; 3 falhas consecutivas da mesma classe pausam.
  */
 export const CPI_FAILURE_KINDS=['cpi_session','deskdata_session','balance','portal_layout','storage','account_changed',
-  'timeout','network','submit_unverified','item_data','unknown'] as const;
+  'timeout','network','submit_unverified','submit_not_sent','item_data','unknown'] as const;
 export type CpiFailureKind=typeof CPI_FAILURE_KINDS[number];
 export const CPI_IMMEDIATE_STOP:ReadonlySet<CpiFailureKind>=new Set<CpiFailureKind>(['cpi_session','deskdata_session','balance','portal_layout','storage','account_changed']);
 export const CPI_FAILURE_STREAK_LIMIT=3;
@@ -16,6 +16,7 @@ export const CPI_FAILURE_LABELS:Record<CpiFailureKind,string>={
   balance:'saldo ou autorização Deskdata insuficiente',portal_layout:'layout do portal CPI não reconhecido',
   storage:'fila CPI protegida indisponível',account_changed:'conta Deskdata alterada durante o processamento',
   timeout:'tempo limite excedido',network:'falha de rede',submit_unverified:'envio CPI sem confirmação',
+  submit_not_sent:'envio CPI não realizado (falha antes de Alterar)',
   item_data:'dados da solicitação inconsistentes',unknown:'falha não classificada'
 };
 
@@ -26,7 +27,8 @@ const RULES:[CpiFailureKind,RegExp][]=[
   ['deskdata_session',/sessao (nao autenticada|expirada)|sessao deskdata encerrada|credenciais invalidas|entre novamente|acesso nao autorizado/],
   // "Operação cancelada": o navegador CPI foi fechado (cpi:close, logout, encerramento) durante a etapa.
   ['cpi_session',/abra (primeiro|e autentique)|sessao cpi|dominio administrativo|redirecionamento inesperado|operacao cancelada/],
-  ['portal_layout',/reconhecid|controle esperado nao encontrado|controle de filtro|selecao do tipo|tipos cpi|tipo 29|total nao confirmado|listagem nao confirmad|identificadores da listagem|nao foi possivel vincular de maneira unica|nao identificado de maneira unica/],
+  // "Portal bloqueado": o modal da pesquisa não fechou; nenhum ciclo seguinte consegue ler a listagem.
+  ['portal_layout',/portal bloqueado|reconhecid|controle esperado nao encontrado|controle de filtro|selecao do tipo|tipos cpi|tipo 29|total nao confirmado|listagem nao confirmad|identificadores da listagem|nao foi possivel vincular de maneira unica|nao identificado de maneira unica/],
   ['timeout',/tempo limite|timeout|excedeu/],
   ['network',/falha de rede|net::|econn|enotfound|fetch failed|servico deskdata indisponivel/],
   ['item_data',/cpf|identidade|historico|corresponde|nao esta aguardando/]

@@ -58,16 +58,21 @@ durabilidade independente, o contrato precisa ser esclarecido antes da homologa�
 
 ## Checkpoints e falhas
 
-O workflow grava `pdf_ready` e depois `submit_started` antes de chamar o adaptador.
+O workflow grava `pdf_ready` antes de chamar o adaptador. **Desde a v0.2 (E6, fix/v02-validacao-anexo-pdf)**
+`submit_started` é gravado pelo adaptador (`beforeSubmit`) depois do anexo conferido e imediatamente antes do
+clique em "Alterar"; sem o checkpoint gravado não há clique. As regras abaixo foram ajustadas a esse ponto.
 
-- `not_submitted`: falha identificada antes da tentativa de anexar/submeter e sem
-  POST ou navegação observados durante o preenchimento; grava
-  `review_required`. Não autoriza repetição automática, mesmo sendo pré-envio.
-- Após iniciar a tentativa de anexo, até erros no preenchimento/arquivo/click são
-  tratados conservadoramente como `unverified`, pois handlers do portal podem ter
-  produzido efeitos. Grava `verification_required`.
-- Um postback ou navegação disparado por controles antes do anexo também impede
-  classificar falhas posteriores como comprovadamente anteriores ao envio.
+- `not_submitted`: falha antes do clique em "Alterar", sem POST ou navegação do portal observados. O modal é
+  fechado sem salvar e o item permanece em `pdf_ready`: é reprocessado depois (adiado em memória) com o MESMO PDF
+  e a mesma classificação, sem POST, sem GET e sem regerar o PDF. 3 seguidas pausam o agente (`submit_not_sent`).
+- `not_submitted_postback`: o portal fez POST ou navegação no frame antes do clique (o agente não salvou nada, mas
+  o formulário pode ter sido enviado pelo próprio portal). Modal fechado sem salvar e item em `review_required`;
+  nunca reprocessado automaticamente.
+- Depois do checkpoint (`submit_started`), qualquer falha é `unverified` → `verification_required`. O modal é
+  mantido aberto para a verificação manual e o FULL AUTO pausa na hora.
+- Se o modal não fechar sem salvar, o portal fica bloqueado: parada sistêmica (`portal_layout`).
+- O motivo de cada falha antes do clique vai ao diagnóstico como `errorType` de lista fixa
+  (`CpiEarlyPostbackError`, `CpiFileInputError`, `CpiSaveButtonError`, `CpiFormActionError`, ...).
 - Exceção não classificada após o checkpoint também grava `verification_required`.
 - Se houver interrupção antes dessa gravação, `submit_started` permanece bloqueante.
 

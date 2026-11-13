@@ -18,7 +18,7 @@ export class DiagnosticLogger {
       else if(key==='step' && (TIMED_STEPS as readonly unknown[]).includes(value))safe[key]=value as string;
       else if(key==='outcome' && (TIMED_OUTCOMES as readonly unknown[]).includes(value))safe[key]=value as string;
       else if(key==='correlationId' && typeof value==='string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value))safe[key]=value;
-      else if(key==='channel' && typeof value==='string' && /^[a-z][a-z0-9-]{0,31}:[a-z][a-z0-9-]{0,31}$/i.test(value))safe[key]=value;
+      else if(key==='channel' && typeof value==='string' && /^[a-z][a-z0-9-]{0,31}(?::[a-z][a-z0-9-]{0,31}){1,2}$/i.test(value))safe[key]=value;
       else if(key==='state' && typeof value==='string' && /^(pending|ready|paused|success|failed|cancelled)$/.test(value))safe[key]=value;
       else if(key==='errorType' && typeof value==='string' && /^[A-Za-z]{1,45}Error$/.test(value))safe[key]=value;
       else if(['durationMs','httpStatus','attempts','count'].includes(key) && typeof value==='number' && Number.isFinite(value) && value>=0)safe[key]=Math.round(value);

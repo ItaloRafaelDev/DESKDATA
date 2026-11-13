@@ -10,7 +10,9 @@ import { findCpiPersonPdf } from './person-pdf.ts';
 import type { CpiWorkItem, CpiWorkStage } from './workflow-store.ts';
 import { NULL_TIMER, type StepTimer } from '../step-timing.ts';
 
-export type CpiCycleOutcome = {state:'completed'|'verification_required'|'pending'|'review_required'; pesquisaId:string;solicitacaoId:string;message:string;warning?:'auxiliary_404';reviewReason?:JudicialIssueCode};
+/** `not_submitted`: falha antes do clique em "Alterar"; item fica em `pdf_ready`, reprocessável com o mesmo PDF e sem POST. */
+export type CpiCycleOutcome = {state:'completed'|'verification_required'|'pending'|'review_required'|'not_submitted'; pesquisaId:string;solicitacaoId:string;message:string;warning?:'auxiliary_404';reviewReason?:JudicialIssueCode};
+export type CpiSaveOutcome = 'confirmed'|'confirmed_auxiliary_404'|'unverified'|'not_submitted'|'not_submitted_postback';
 export interface FullCycleServices {
   account:string;
   ids:CpiPendingRowId;
@@ -30,8 +32,11 @@ export interface FullCycleServices {
   checkByCode(code:string):Promise<{state:'pending';queryCode:string}|{state:'ready';queryCode:string;payload:unknown}>;
   /** Grava o PDF CPI (CPI_<pesquisaId>_<solicitacaoId>_<data>.pdf) e o registra na consulta. */
   savePdf(cpf:string,recordId:string,queryCode:string|undefined,data:NormalizedData):Promise<void>;
-  uploadAndSave(pdfPath:string,classification:'restrictions'|'information'):Promise<'confirmed'|'confirmed_auxiliary_404'|'unverified'|'not_submitted'>;
+  /** `beforeSubmit` grava `submit_started` imediatamente antes do clique em "Alterar"; sem ele gravado, não há clique. */
+  uploadAndSave(pdfPath:string,classification:'restrictions'|'information',beforeSubmit:()=>Promise<void>):Promise<CpiSaveOutcome>;
   closeCompletedDetail():Promise<void>;
+  /** Fecha o modal sem salvar (falha antes do clique). */
+  closeUnsavedDetail():Promise<void>;
   /** Medição de duração por etapa; recebe apenas nomes fixos de etapa. */
   timer?:Pick<StepTimer,'step'>;
 }
@@ -54,6 +59,13 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
   if(!isValidCpf(cpf))throw new Error('CPF do detalhe CPI inválido.');
   if(!job)job=await s.claim();
   const latest=await s.findLatest(cpf);
+  // Reprocessamento após falha antes do clique: o PDF e a classificação de `pdf_ready` são reaproveitados,
+  // sem nova consulta (nem POST nem GET) e sem regerar o PDF. Sem PDF válido, segue o caminho normal (GET).
+  if(job.stage==='pdf_ready'&&job.classification&&latest&&job.historyRecordId===latest.id&&
+    latest.account===s.account&&latest.cpf===cpf&&(latest.kind===undefined||latest.kind==='person')){
+    const reused=await findCpiPersonPdf(latest,cpf,s.outputFolder,s.ids).catch(()=>null);
+    if(reused)return submit(s,reused,job.classification);
+  }
   let record=latest;
   let payload:unknown;
   let queryCode=record?.queryCode;
@@ -122,17 +134,39 @@ export async function executeCpiPersonCycle(s:FullCycleServices):Promise<CpiCycl
   // Nunca voltar silenciosamente ao PDF legado se a geração atual não foi vinculada.
   const pdf=await findCpiPersonPdf({...updated,pdfPaths:currentPdfPaths},cpf,s.outputFolder,s.ids);
   await s.mark('pdf_ready',{historyRecordId:record.id,classification:classification.result});
-  // Sem retry após esta marcação: eventual timeout ou queda pode significar envio já aceito.
-  await s.mark('submit_started');
-  let confirmation:Awaited<ReturnType<FullCycleServices['uploadAndSave']>>;
-  try{confirmation=await s.uploadAndSave(pdf,classification.result);}
+  return submit(s,pdf,classification.result);
+}
+/**
+ * Anexar → conferir o input → `submit_started` → "Alterar" → confirmação → modal fechado → item fora da listagem
+ * → `completed`. O checkpoint é gravado pelo adaptador logo antes do clique: sem retry depois dele.
+ */
+async function submit(s:FullCycleServices,pdf:string,classification:'restrictions'|'information'):Promise<CpiCycleOutcome>{
+  const timer=s.timer??NULL_TIMER;
+  let checkpoint=false;
+  let confirmation:CpiSaveOutcome;
+  try{confirmation=await s.uploadAndSave(pdf,classification,async()=>{await s.mark('submit_started');checkpoint=true;});}
   catch{
-    await s.mark('verification_required');
-    return outcome(s,'verification_required','Falha após o checkpoint de envio; resultado remoto incerto. Verificar manualmente, sem reenvio.');
+    // Exceção do adaptador: sem prova de que o clique não ocorreu, só o checkpoint decide.
+    if(!checkpoint)confirmation='not_submitted';
+    else{
+      await s.mark('verification_required');
+      return outcome(s,'verification_required','Falha após o checkpoint de envio; resultado remoto incerto. Verificar manualmente, sem reenvio.');
+    }
   }
-  if(confirmation==='not_submitted'){
-    await s.mark('review_required');
-    return outcome(s,'review_required','Falha comprovada antes de anexar ou submeter o formulário. PDF e classificação preservados; revisão manual necessária.');
+  if(confirmation==='not_submitted'||confirmation==='not_submitted_postback'){
+    if(checkpoint){
+      // Defesa: com o checkpoint gravado o clique pode ter ocorrido; nunca tratar como não enviado.
+      await s.mark('verification_required');
+      return outcome(s,'verification_required','Falha após o checkpoint de envio; resultado remoto incerto. Verificar manualmente, sem reenvio.');
+    }
+    const postback=confirmation==='not_submitted_postback';
+    // Postback do próprio portal antes do clique: nada salvo pelo agente, mas o formulário pode ter sido enviado
+    // pelo portal. Vai para revisão manual (nunca reprocessado automaticamente), sem verification_required.
+    if(postback)await s.mark('review_required');
+    try{await timer.step('cpi_close_unsaved',()=>s.closeUnsavedDetail());}
+    catch(error){throw new Error('Modal da pesquisa CPI não foi fechado; portal bloqueado. Feche o detalhe manualmente no Edge.',{cause:error});}
+    if(postback)return outcome(s,'review_required','O portal enviou o formulário antes do clique em Alterar; nada foi salvo pelo agente. Modal fechado sem salvar; conferir a pesquisa manualmente.');
+    return outcome(s,'not_submitted','Falha antes do clique em Alterar; nada foi salvo. Modal fechado sem salvar; a pesquisa será reprocessada com o mesmo PDF, sem nova consulta.');
   }
   if(confirmation==='confirmed'||confirmation==='confirmed_auxiliary_404'){
     // O envio remoto foi confirmado, mas a finalização local ainda pode falhar.

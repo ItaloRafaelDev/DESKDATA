@@ -143,10 +143,12 @@ for(const change of ['navigation','alert']){
   }));
 }
 
-test('CPI: POST disparado durante preenchimento torna a falha posterior incerta',()=>portalFixture({
+// E6: antes do clique em "Alterar" nada foi salvo pelo agente. O postback do portal não é envio incerto
+// (verification_required); vira 'not_submitted_postback' (revisão manual, sem reprocessamento automático).
+test('CPI: POST disparado pelo portal durante preenchimento é postback precoce, não envio incerto',()=>portalFixture({
   initial:editable().replace('<select name="source">','<select name="source" onchange="this.form.submit()">')
 },async({driver,pdf,posts})=>{
-  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'unverified');
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',500),'not_submitted_postback');
   assert.equal(posts(),1);
 }));
 

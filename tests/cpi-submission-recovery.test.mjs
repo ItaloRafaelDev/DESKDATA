@@ -10,7 +10,8 @@ import { CpiFullAutoRunner } from '../src/main/cpi/full-auto-runner.ts';
 const ids={pesquisaId:'537987',solicitacaoId:'275064'},cpf='52998224725',account='recovery@example.invalid';
 const protector={isAvailable:async()=>true,encrypt:async text=>Buffer.from(text),decrypt:async buf=>({result:buf.toString(),shouldReEncrypt:false})};
 
-for(const mode of ['unverified','exception','not_submitted','submit_started']){
+// not_submitted (falha antes do clique) tem teste próprio abaixo: agora é reprocessável com o mesmo PDF (E6).
+for(const mode of ['unverified','exception','submit_started']){
   test(`CPI: reinício após ${mode} preserva PDF/classificação e bloqueia reenvio antes de abrir o detalhe`,async()=>{
     const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-reconcile-')));
     try{
@@ -36,8 +37,10 @@ for(const mode of ['unverified','exception','not_submitted','submit_started']){
           assert.equal(data.lawsuits.value.items[0].court_type,'Criminal');renders++;
           await writeFile(refreshedPath,bytes);record.pdfPaths.push(refreshedPath);
         },
-        uploadAndSave:async(file,classification)=>{
+        // Contrato E6: o adaptador grava o checkpoint (beforeSubmit) logo antes do clique; a falha simulada é depois dele.
+        uploadAndSave:async(file,classification,beforeSubmit)=>{
           uploads++;assert.equal(file,refreshedPath);assert.equal(classification,'restrictions');
+          await beforeSubmit();
           assert.equal((await store.get(account,ids)).stage,'submit_started');
           if(mode==='exception')throw Error('Conexão perdida após POST');
           return mode;
