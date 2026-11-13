@@ -17,19 +17,25 @@ Todo texto exibido ao usuário, mensagens de erro e documentação ficam em **po
 
 ### Arquitetura (pontos que não aparecem só lendo um arquivo)
 
-- **IPC:** todo canal é registrado por `bind()` em `src/main/index.ts`, que aplica `guard()` (só o frame principal
-  da janela principal), passa pelo `OperationGate` (`operation-gate.ts`) e grava diagnóstico sanitizado.
-  O gate é a única fonte de estado de concorrência: exclusiva com dono (`holder` = canal), segundo plano drenável,
-  chave contra reentrada e fases do encerramento. Não crie flags globais (`busy` e similares). Canal novo usa `bind()`;
-  se altera estado compartilhado, entra em `exclusiveChannels`. `cpi:close` e `auth:logout` pausam o FULL AUTO e param
-  o monitor no `bind()` antes de reservar a exclusiva.
-- **Preload** expõe o `DesktopApi` tipado (`src/shared/types.ts`) e é gerado como CJS (`index.cjs`).
+- **IPC:** os nomes de canal existem só em `src/shared/ipc-contract.ts` (`IPC_INVOKE`, `IPC_EVENTS`), indexados pelos
+  métodos do `DesktopApi`; nenhum outro arquivo de `src/` escreve o nome de um canal como string. `src/main/index.ts` é
+  só a raiz de composição: cria os serviços, monta o `MainContext` (`ipc/context.ts`) e chama `register<Domínio>Ipc`
+  (`src/main/ipc/{auth,person,pis,company,cpi,maintenance,settings}.ts`). Cada handler é registrado por `bind(método, …)`
+  (`ipc/bind.ts`), que aplica `guard()` (só o frame principal da janela principal), passa pelo `OperationGate`
+  (`operation-gate.ts`) e grava diagnóstico sanitizado. O gate é a única fonte de estado de concorrência: exclusiva
+  com dono (`holder` = canal), segundo plano drenável, chave contra reentrada e fases do encerramento. Não crie flags
+  globais (`busy` e similares). Canal novo: método no `DesktopApi`, entrada em `IPC_INVOKE` e `bind()`; se altera
+  estado compartilhado, entra em `EXCLUSIVE_INVOKE`. `cpi:close` e `auth:logout` (`CPI_STOPPING_INVOKE`) pausam o
+  FULL AUTO e param o monitor no `bind()` antes de reservar a exclusiva. Canais de inspeção manual da CPI
+  (`DEV_ONLY_INVOKE`) só são registrados quando `!app.isPackaged`.
+- **Preload** expõe o `DesktopApi` tipado (`src/shared/types.ts`), montado a partir do contrato, e é gerado como CJS (`index.cjs`).
 - **CPI** (`src/main/cpi`): `cpi-browser.ts` controla o Edge (`playwright-core`, login manual).
   `full-cycle.ts` (`executeCpiPersonCycle`) executa um item: reivindicar → consulta Deskdata → classificar
   (`person-rules.ts`) → PDF → anexar e salvar → confirmar (`response-confirmation.ts`). O progresso fica cifrado em
   `workflow-store.ts`, com os estágios `claimed → query_started → query_pending → pdf_ready → submit_started → completed`,
   ou `verification_required` / `review_required`. Leia o documento correspondente em `docs/` antes de alterar a CPI.
-  O FULL AUTO (`full-auto-runner.ts`) roda enquanto houver pesquisas: `queue-selection.ts` nunca reabre itens finais
+  O FULL AUTO (`full-auto-runner.ts`) roda enquanto houver pesquisas; a varredura de cada ciclo (fila, seleção,
+  item, falha → revisão) fica em `full-auto-orchestrator.ts` (`createCpiScan`). `queue-selection.ts` nunca reabre itens finais
   ou em revisão; `failure-classes.ts` decide entre parada imediata (D1) e revisão do item (3 seguidas da mesma classe pausam).
 - **Prazos e cancelamento** (`deadline.ts`): toda espera externa tem prazo. As operações do `CpiBrowser` rodam em
   `bounded()` (`CPI_OPERATION_TIMEOUTS`) e conferem o sinal (`throwIfAborted`) antes de cada efeito; `close()`

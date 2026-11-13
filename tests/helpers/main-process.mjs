@@ -22,7 +22,7 @@ export async function withMainProcess(submitCpf,run,options={}){
   const electron={
     app:{getPath:()=>root,setPath:()=>{},requestSingleInstanceLock:()=>true,
       on:(name,fn)=>{listeners.set(name,[...(listeners.get(name)??[]),fn]);},quit,
-      isPackaged:true,whenReady:()=>({then:fn=>{initialize=Promise.resolve().then(fn);return initialize;}})},
+      isPackaged:options.isPackaged??true,getAppPath:()=>root,whenReady:()=>({then:fn=>{initialize=Promise.resolve().then(fn);return initialize;}})},
     BrowserWindow:class {
       constructor(){window=this;this.webContents={id:1,mainFrame:{},send:()=>{},isDestroyed:()=>false,
         setWindowOpenHandler:()=>{},on:()=>{}};}

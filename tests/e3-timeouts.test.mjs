@@ -175,7 +175,8 @@ test('E3/W25: seleção de pasta não prende o bloqueio exclusivo nem o encerram
     await until(hasQuit);
     assert.match((await picking)?.message??'',/encerramento/);
     assert.equal(events.includes('settings_saved'),false);
-  },{pickOutputFolder:()=>{opened.resolve();return hang();},cpiOpen:true});
+    // E5: `cpi:filter-person-29` é canal de inspeção, registrado só fora do app instalado.
+  },{pickOutputFolder:()=>{opened.resolve();return hang();},cpiOpen:true,isPackaged:false});
 });
 
 // ---------- navegador CPI (W8–W23, L8, C9) com página falsa ----------
