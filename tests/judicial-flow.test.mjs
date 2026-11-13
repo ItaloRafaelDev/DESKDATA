@@ -31,7 +31,7 @@ for(const [lawsuits,reason] of [
         getJob:()=>store.get(account,ids),claim:()=>store.claim(account,ids),mark:(stage,updates)=>store.mark(account,ids,stage,updates),
         findLatest:async()=>record,checkByCode:async()=>{gets++;return {state:'ready',queryCode:code,payload:payload(lawsuits)};},
         beginHistory:forbidden,setQueryCode:forbidden,getCredits:forbidden,verifyPaidBalance:forbidden,
-        paidApproved:forbidden,submitCpf:forbidden,savePdf:forbidden,uploadAndSave:forbidden,closeCompletedDetail:forbidden};
+        paidApproved:forbidden,submitCpf:forbidden,savePdf:forbidden,uploadAndSave:forbidden,finalizeSubmitted:forbidden};
       const result=await executeCpiPersonCycle(services);
       assert.equal(result.state,'review_required');assert.equal(result.reviewReason,reason);
       assert.equal(gets,1);assert.deepEqual(record,before);
@@ -118,7 +118,7 @@ test('judicial: PDF ready legado não substitui relatório da resposta usada na 
       },
       uploadAndSave:async(path,classification)=>{
         uploads++;assert.equal(path,newPath);assert.equal(classification,'restrictions');return 'unverified';
-      },closeCompletedDetail:forbidden};
+      },finalizeSubmitted:forbidden};
     assert.equal((await executeCpiPersonCycle(services)).state,'verification_required');
     assert.equal(renders,1);assert.equal(uploads,1);assert.deepEqual(await readFile(oldPath),oldBytes);
     assert.equal((await executeCpiPersonCycle(services)).state,'review_required');

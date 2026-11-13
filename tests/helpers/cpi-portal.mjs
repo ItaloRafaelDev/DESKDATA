@@ -56,12 +56,20 @@ export function editable({legacy=false,target=ids,statusReloads=false,noRadios=f
     }
   </script></body></html>`;
 }
-export function persisted({target=ids,legacy=false,result='information',omit,source='Desk Data'}={}){
-  return `<html><head><meta charset="utf-8"></head><body>${headings(target,legacy)}${row('Status','Respondida')}
+/** Página de erro observada no portal real para o recurso auxiliar (ASP.NET, HTTP 404). */
+export const auxiliary404Html='<div class="erro-aux">404;404; Erro de Servidor no Aplicativo "/". Não é possível encontrar o recurso. '+
+  'Descrição: HTTP 404. URL solicitada: /cpi_api_request.aspx</div>';
+/**
+ * Resposta salva em modo leitura. `aux404`: exibe o erro 404 do recurso auxiliar e o requisita de fato.
+ * `status`: 'Respondida' por padrão; `result`: classificação exibida.
+ */
+export function persisted({target=ids,legacy=false,result='information',omit,source='Desk Data',status='Respondida',aux404=false}={}){
+  return `<html><head><meta charset="utf-8"></head><body>${headings(target,legacy)}${row('Status',status)}
     ${omit==='source'?'':row('Pesquisador/Fonte',source)}
     ${row('Resultado',result==='restrictions'?'Sim, Consta Restrições':'Há Informações')}
     ${omit==='timestamp'?'':row('Respondida em','11/11/2026 10:30:00')}
-    ${omit==='pdf'?'':row('Em arquivo','Documento PDF')}</body></html>`;
+    ${omit==='pdf'?'':row('Em arquivo','Documento PDF')}
+    ${aux404?`${auxiliary404Html}<script>fetch('/cpi_api_request.aspx').catch(function(){})</script>`:''}</body></html>`;
 }
 /** Valor de um campo simples no corpo multipart do POST (null se ausente). */
 export function postedField(body,name){
@@ -73,12 +81,18 @@ const afterSavePages={
   modal_open:'<html><body><h2>Pesquisa alterada</h2></body></html>',
   list:'<html><body><script>parent.document.getElementById("sb-container").style.display="none"</script></body></html>',
   error_alert:'<html><body><script>alert("Erro ao gravar a pesquisa")</script></body></html>',
-  error_text:'<html><body><div>Erro ao salvar: operação rejeitada.</div></body></html>'
+  error_text:'<html><body><div>Erro ao salvar: operação rejeitada.</div></body></html>',
+  // Resposta do POST com o 404 auxiliar visível e requisitado; o modal continua aberto.
+  aux404:`<html><head><meta charset="utf-8"></head><body><h2>Pesquisa alterada</h2>${auxiliary404Html}<script>fetch('/cpi_api_request.aspx').catch(function(){})</script></body></html>`,
+  // O mesmo 404 auxiliar, mas o portal volta sozinho para a lista.
+  list_aux404:`<html><head><meta charset="utf-8"></head><body>${auxiliary404Html}<iframe src="/cpi_api_request.aspx"></iframe><script>parent.document.getElementById("sb-container").style.display="none"</script></body></html>`
 };
 
 /**
  * Todos os requests são respondidos localmente; nenhuma rota usa continue/fetch.
- * options.afterSave: 'modal_open' (padrão) | 'list' | 'error_alert' | 'error_text' | 'login' | 'http500'
+ * options.afterSave: 'modal_open' (padrão) | 'list' | 'aux404' | 'list_aux404' | 'error_alert' | 'error_text' | 'login' | 'http500'
+ * options.detailAfterPost: HTML devolvido ao GET do detalhe depois de um POST (leitura independente);
+ *   ausente = o formulário editável continua sendo servido (nada persistido). Função recebe o nº de GETs.
  */
 export async function portalFixture(options,run){
   const browser=await chromium.launch({channel:'msedge',headless:true});
@@ -86,7 +100,7 @@ export async function portalFixture(options,run){
   const pdf=join(dir,'CPI_537987_275064_2026-11-13.pdf');
   await writeFile(pdf,'%PDF-1.4\n'+'fixture'.repeat(30));
   const context=await browser.newContext({serviceWorkers:'block'});
-  let posts=0,postedBody=null,attachedFile=null;
+  let posts=0,postedBody=null,attachedFile=null,probes=0,auxiliaryRequests=0;
   await context.exposeBinding('captureFixtureUpload',(_source,bytes)=>{attachedFile=Buffer.from(bytes);});
   await context.addInitScript(()=>{
     document.addEventListener('change',event=>{
@@ -104,10 +118,21 @@ export async function portalFixture(options,run){
       if(mode==='http500')return route.fulfill({status:500,contentType:'text/html',body:'<h1>Erro de servidor no aplicativo</h1>'});
       return route.fulfill({status:200,contentType:'text/html',body:options.saved??afterSavePages[mode]});
     }
+    if(url.pathname==='/cpi_api_request.aspx'){
+      auxiliaryRequests++;
+      // options.auxiliaryStatus: status do recurso auxiliar (404 observado no portal real; outro valor = condição não observada).
+      return route.fulfill({status:options.auxiliaryStatus??404,contentType:'text/html',body:`<html><body>${auxiliary404Html}</body></html>`});
+    }
     if(url.pathname==='/fixture-list')return route.fulfill({contentType:'text/html',body:
       `<div id="sb-container"><div id="sb-title-inner">Responder / Atualizar Pesquisa <a title="Fechar" onclick="Shadowbox.close()">x</a></div>`+
       `<iframe id="sb-content" src="${detailUrl}"></iframe></div>${options.extraFrame??''}`+
-      `<script>var Shadowbox={close:function(){document.getElementById('sb-container').style.display='none';}};</script>`});
+      `<script>window.__closes=0;var Shadowbox={close:function(){window.__closes++;document.getElementById('sb-container').style.display='none';}};</script>`});
+    if(posts>0&&options.detailAfterPost!==undefined&&url.pathname===new URL(detailUrl).pathname){
+      probes++;
+      const page=typeof options.detailAfterPost==='function'?options.detailAfterPost(probes):options.detailAfterPost;
+      if(page===null)return route.abort('connectionrefused');
+      return route.fulfill(typeof page==='string'?{contentType:'text/html',body:page}:{contentType:'text/html',...page});
+    }
     if(url.pathname==='/acesso/checkUser.aspx')return route.fulfill({contentType:'text/html',body:'<input type="password">Login'});
     if(options.pages?.[url.pathname]){
       const page=options.pages[url.pathname];
@@ -123,6 +148,8 @@ export async function portalFixture(options,run){
     await page.goto(`${origin}/fixture-list`);
     await page.locator('#sb-content').contentFrame().locator('input[type="file"]').waitFor();
     await driver.inspectPendingPersonDetails(ids);
-    await run({driver,page,pdf,posts:()=>posts,body:()=>postedBody,attachedFile:()=>attachedFile});
+    await run({driver,page,pdf,posts:()=>posts,body:()=>postedBody,attachedFile:()=>attachedFile,
+      probes:()=>probes,auxiliaryRequests:()=>auxiliaryRequests,closes:()=>page.evaluate(()=>window.__closes),
+      pages:()=>page.context().pages().length});
   }finally{await context.close();await browser.close();await rm(dir,{recursive:true,force:true,maxRetries:3,retryDelay:100});}
 }

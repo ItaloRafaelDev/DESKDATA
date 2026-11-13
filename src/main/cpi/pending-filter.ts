@@ -1,5 +1,6 @@
 import type { Frame, Locator, Page } from 'playwright-core';
 import { throwIfAborted } from '../deadline.ts';
+import { NULL_TIMER, type StepTimer, type TimedStep } from '../step-timing.ts';
 
 /** Caminho observado na barra de endereços da CPI; não é endpoint de API. */
 export const CPI_PENDING_URL = 'https://adm.cpicentral.com.br/zpersEspecial/pesquisas/aguardando/mod_t_aguardando.aspx';
@@ -10,6 +11,16 @@ export interface CpiPendingFilterResult {
   typeId: '29';
   total: number | null;
   state: 'empty' | 'found' | 'unconfirmed';
+}
+
+/** Erro com descrição fixa da etapa: seguro para diagnóstico e com a causa Playwright preservada. */
+export class CpiFilterStepError extends Error {
+  readonly step: TimedStep;
+  constructor(step:TimedStep,message:string,cause:unknown){super(message,{cause});this.name='CpiFilterStepError';this.step=step;}
+}
+async function filterStep<T>(timer:Pick<StepTimer,'step'>,step:TimedStep,message:string,work:()=>Promise<T>):Promise<T>{
+  try{return await timer.step(step,work);}
+  catch(error){throw new CpiFilterStepError(step,message,error);}
 }
 
 /** O rodapé é a única informação extraída da listagem nesta fase; nunca traz dados pessoais. */
@@ -88,22 +99,27 @@ export async function readListingCount(page: Page, timeoutMs = 25000, signal?: A
  * Fase 2: altera apenas controles de FILTRO da listagem, sem abrir solicitações,
  * consultar CPFs ou modificar registros CPI. Exige login realizado manualmente.
  */
-export async function filterPendingPerson29(page: Page, signal?: AbortSignal): Promise<CpiPendingFilterResult> {
+export async function filterPendingPerson29(page: Page, signal?: AbortSignal, timer:Pick<StepTimer,'step'>=NULL_TIMER): Promise<CpiPendingFilterResult> {
   const current = new URL(page.url());
   if (current.hostname !== CPI_HOST) throw new Error('Navegador não está no domínio administrativo CPI.');
 
   if (current.pathname.toLowerCase() !== new URL(CPI_PENDING_URL).pathname.toLowerCase()) {
-    await page.goto(CPI_PENDING_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await filterStep(timer,'cpi_filter_navigate','Navegação para a listagem CPI não respondeu.',
+      ()=>page.goto(CPI_PENDING_URL, { waitUntil: 'domcontentloaded', timeout: 30000 }).then(()=>undefined));
   }
   if (new URL(page.url()).hostname !== CPI_HOST) throw new Error('Sessão CPI inválida ou redirecionamento inesperado.');
 
   // Botão observado no DOM: <i title="Filtros Avançados" ... onclick="set_tipo_pesq();">
-  const advanced = await visibleControl(page, '[title="Filtros Avançados"]', 12000, signal);
-  throwIfAborted(signal, 'cpi_filter');
-  await advanced.locator.click({ timeout: 10000 });
+  await filterStep(timer,'cpi_filter_open','Controle Filtros Avançados não respondeu.',async()=>{
+    const control=await visibleControl(page, '[title="Filtros Avançados"]', 12000, signal);
+    throwIfAborted(signal, 'cpi_filter');
+    await control.locator.click({ timeout: 10000 });
+    return control;
+  });
 
   // Modal de tipos: pode estar em outro iframe CPI. Nunca depende de coordenadas nem de frame index.
-  const { frame, locator: type29 } = await visibleControl(page, 'input#id_tipo_pesq_29[type="checkbox"]', 12000, signal);
+  const { frame, locator: type29 } = await filterStep(timer,'cpi_filter_type','Seleção do tipo de pesquisa 29 não respondeu.',
+    ()=>visibleControl(page, 'input#id_tipo_pesq_29[type="checkbox"]', 12000, signal));
   const typeValue = await type29.getAttribute('value');
   if (!typeValue || typeValue.split(',')[0].trim() !== '29') {
     throw new Error('O checkbox identificado não corresponde ao tipo CPI 29.');
@@ -113,27 +129,34 @@ export async function filterPendingPerson29(page: Page, signal?: AbortSignal): P
   if (length < 1) throw new Error('Não foi possível conferir o conjunto de tipos CPI.');
 
   // Garantir filtro EXCLUSIVO: remover quaisquer tipos previamente selecionados.
-  for (let index = 0; index < length; index++) {
-    const checkbox = options.nth(index);
-    const id = await checkbox.getAttribute('id');
-    if (id !== 'id_tipo_pesq_29' && await checkbox.isChecked()) await setCpiFilterCheckbox(checkbox, false, signal);
-  }
-  await setCpiFilterCheckbox(type29, true, signal);
-  const checked = await options.evaluateAll(nodes => nodes.filter(node => (node as HTMLInputElement).checked).map(node => node.id));
-  if (checked.length !== 1 || checked[0] !== 'id_tipo_pesq_29') {
-    throw new Error('Não foi possível garantir a seleção exclusiva do tipo 29.');
-  }
+  await filterStep(timer,'cpi_filter_select','Seleção exclusiva do tipo de pesquisa 29 não respondeu.',async()=>{
+    for (let index = 0; index < length; index++) {
+      const checkbox = options.nth(index);
+      const id = await checkbox.getAttribute('id');
+      if (id !== 'id_tipo_pesq_29' && await checkbox.isChecked()) await setCpiFilterCheckbox(checkbox, false, signal);
+    }
+    await setCpiFilterCheckbox(type29, true, signal);
+    const checked = await options.evaluateAll(nodes => nodes.filter(node => (node as HTMLInputElement).checked).map(node => node.id));
+    if (checked.length !== 1 || checked[0] !== 'id_tipo_pesq_29') {
+      throw new Error('Não foi possível garantir a seleção exclusiva do tipo 29.');
+    }
+  });
 
   // Botão confirmado no DOM: <a class="button" onclick="javascript:set();">Selecionar</a>.
-  throwIfAborted(signal, 'cpi_filter');
-  await frame.getByRole('link', { name: 'Selecionar', exact: true }).click({ timeout: 10000 });
+  await filterStep(timer,'cpi_filter_apply','Controle Selecionar do filtro CPI não respondeu.',async()=>{
+    throwIfAborted(signal, 'cpi_filter');
+    await frame.getByRole('link', { name: 'Selecionar', exact: true }).click({ timeout: 10000 });
+  });
 
   // Botão confirmado no DOM: <i title="Mostrar Tudo" onclick="...texto_change(1,0);">
-  const showAll = await visibleControl(page, '[title="Mostrar Tudo"]', 15000, signal);
-  throwIfAborted(signal, 'cpi_filter');
-  await showAll.locator.click({ timeout: 15000 });
+  await filterStep(timer,'cpi_filter_refresh','Controle Mostrar Tudo não respondeu.',async()=>{
+    const showAll = await visibleControl(page, '[title="Mostrar Tudo"]', 15000, signal);
+    throwIfAborted(signal, 'cpi_filter');
+    await showAll.locator.click({ timeout: 15000 });
+  });
 
   // O retorno 0 é uma listagem vazia válida; ausência do rodapé não vira falso 0.
-  const total = await readListingCount(page, 25000, signal);
+  const total = await filterStep(timer,'cpi_filter_listing','Rodapé da listagem CPI não respondeu.',
+    ()=>readListingCount(page, 25000, signal));
   return { typeId: '29', total, state: total === null ? 'unconfirmed' : total === 0 ? 'empty' : 'found' };
 }

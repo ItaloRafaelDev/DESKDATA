@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 /** Somente nomes fixos chegam ao diagnóstico: nenhum CPF, CNPJ, nome, caminho ou código de consulta. */
 export const TIMED_FLOWS=['cpi','person','pis','company'] as const;
 export const TIMED_STEPS=[
-  'cpi_filter','cpi_rows','cpi_select','cpi_open_detail','cpi_read_cpf','cpi_fill','cpi_attach','cpi_save','cpi_close_detail',
+  'cpi_filter','cpi_filter_modal','cpi_filter_navigate','cpi_filter_open','cpi_filter_type','cpi_filter_select','cpi_filter_apply',
+  'cpi_filter_refresh','cpi_filter_listing','cpi_rows','cpi_select','cpi_open_detail','cpi_read_cpf','cpi_fill','cpi_attach','cpi_save','cpi_close_detail',
   'deskdata_credits','deskdata_query','deskdata_fetch','report_pdf'
 ] as const;
 export const TIMED_OUTCOMES=['completed','verification_required','review_required','pending','ready','no_pis','empty','idle','item_failed','dry_run'] as const;

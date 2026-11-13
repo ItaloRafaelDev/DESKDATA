@@ -6,20 +6,24 @@
  * - Demais classes: o item vai para revisão e o agente segue; 3 falhas consecutivas da mesma classe pausam.
  */
 export const CPI_FAILURE_KINDS=['cpi_session','deskdata_session','balance','portal_layout','storage','account_changed',
-  'timeout','network','submit_unverified','item_data','unknown'] as const;
+  'cpi_operational','timeout','network','submit_unverified','item_data','unknown'] as const;
 export type CpiFailureKind=typeof CPI_FAILURE_KINDS[number];
-export const CPI_IMMEDIATE_STOP:ReadonlySet<CpiFailureKind>=new Set<CpiFailureKind>(['cpi_session','deskdata_session','balance','portal_layout','storage','account_changed']);
+/** `cpi_operational`: a janela da pesquisa ficou aberta após um envio; nenhuma outra pesquisa é aberta. */
+export const CPI_IMMEDIATE_STOP:ReadonlySet<CpiFailureKind>=new Set<CpiFailureKind>(['cpi_session','deskdata_session','balance','portal_layout','storage','account_changed','cpi_operational']);
 export const CPI_FAILURE_STREAK_LIMIT=3;
 
 export const CPI_FAILURE_LABELS:Record<CpiFailureKind,string>={
   cpi_session:'sessão CPI indisponível ou expirada',deskdata_session:'sessão Deskdata expirada ou sem autorização',
   balance:'saldo ou autorização Deskdata insuficiente',portal_layout:'layout do portal CPI não reconhecido',
   storage:'fila CPI protegida indisponível',account_changed:'conta Deskdata alterada durante o processamento',
+  cpi_operational:'janela CPI aberta após envio (pendência operacional)',
   timeout:'tempo limite excedido',network:'falha de rede',submit_unverified:'envio CPI sem confirmação',
   item_data:'dados da solicitação inconsistentes',unknown:'falha não classificada'
 };
 
 const RULES:[CpiFailureKind,RegExp][]=[
+  // Primeira regra: a mensagem cita a janela da pesquisa e não pode cair em sessão ou dados do item.
+  ['cpi_operational',/pendencia operacional cpi/],
   ['storage',/fila cpi|protecao windows indisponivel/],
   ['account_changed',/conta deskdata alterada/],
   ['balance',/saldo|creditos insuficientes|autorize novas consultas|autorizacao deskdata/],

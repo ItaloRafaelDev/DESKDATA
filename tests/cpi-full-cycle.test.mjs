@@ -19,6 +19,7 @@ function services(overrides={}){
     getCpf:async()=>CPF,getJob:async()=>job,
     claim:async()=>{job={...ids,account:s.account,stage:'claimed',updatedAt:new Date().toISOString()};return job;},
     mark:async(stage,update={})=>{events.push(stage);job={...job,...update,stage};return job;},
+    recordNotSubmitted:async()=>{events.push('not_submitted_proven');job={...job,stage:'pdf_ready'};return job;},
     findLatest:async()=>record,
     beginHistory:async()=>{record={id:'123e4567-e89b-12d3-a456-426614174000',kind:'person',cpf:CPF,account:s.account,status:'uncertain',queryCode:undefined,pdfPaths:[]};return record;},
     setQueryCode:async(_id,code)=>{record.queryCode=code;},
@@ -27,7 +28,7 @@ function services(overrides={}){
     checkByCode:async()=>({state:'ready',queryCode:'Q-AAAAAAAAAA',payload:data}),
     savePdf:async()=>{record.status='ready';},
     uploadAndSave:async()=>('confirmed'),
-    closeCompletedDetail:async()=>events.push('closed_detail'),
+    finalizeSubmitted:async()=>{events.push('closed_detail');return {persistence:'confirmed',auxiliary404:false,modal:'closed',listing:'refreshed',browserReleased:true};},
     ...overrides
   };
   return {s,events,setRecord:r=>{record=r;}};
@@ -87,9 +88,11 @@ test('ciclo completo simulado: um POST, PDF correto, resposta Há Informações 
     const result=await executeCpiPersonCycle(s);
     assert.equal(result.state,'completed');assert.equal(uploadCount,1);
     assert.equal(events.filter(e=>e==='reserved').length,1);
-    assert.ok(events.indexOf('submit_started')<events.indexOf('completed'));
-    assert.ok(events.indexOf('review_required')<events.indexOf('closed_detail'));
+    assert.ok(events.indexOf('submit_started')<events.indexOf('closed_detail'));
     assert.ok(events.indexOf('closed_detail')<events.indexOf('completed'));
+    // submit_started (bloqueante) permanece até a leitura independente decidir; sem revisão intermediária.
+    assert.equal(events.includes('review_required'),false);
+    assert.equal(result.warnings,undefined);
     assert.equal(events.filter(e=>e==='closed_detail').length,1);
     const again=await executeCpiPersonCycle(s);
     assert.equal(again.state,'completed');assert.equal(uploadCount,1);
@@ -173,59 +176,141 @@ test('processo Criminal vira restrições; envio sem confirmação fica travado'
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 
-test('resposta persistida com falha no fechamento nao e reenviada e exige revisao',async()=>{
-  const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-close-')));
-  try{
-    let uploads=0,closeCalls=0;
-    const {s,events}=services({outputFolder:dir,
-      savePdf:async cpf=>{
-        const path=join(dir,'CPI_573987_275064_2026-11-10.pdf');
-        await writeFile(path,'%PDF-1.4\n'+'x'.repeat(150));
-        const latest=await s.findLatest(cpf);latest.status='ready';latest.pdfPaths=[path];
-      },
-      uploadAndSave:async()=>{uploads++;return 'confirmed';},
-      closeCompletedDetail:async()=>{closeCalls++;throw Error('Shadowbox indisponivel');}
-    });
-    const result=await executeCpiPersonCycle(s);
-    assert.equal(result.state,'review_required');
-    assert.equal(uploads,1);assert.equal(closeCalls,1);
-    assert.ok(events.includes('review_required'));
-    assert.equal(events.includes('completed'),false);
-    const second=await executeCpiPersonCycle(s);
-    assert.equal(second.state,'review_required');
-    assert.equal(uploads,1);assert.equal(closeCalls,1);
-  }finally{await rm(dir,{recursive:true,force:true});}
-});
+// ---------- finalização: persistência decide; modal e listagem são avisos ----------
+const report=(extra={})=>({persistence:'confirmed',auxiliary404:false,modal:'closed',listing:'refreshed',browserReleased:true,...extra});
+async function withCycleDir(name,run){
+  const dir=await realpath(await mkdtemp(join(tmpdir(),`deskdata-cpi-${name}-`)));
+  try{return await run(dir);}finally{await rm(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
+}
+function pdfWriter(dir,s){
+  return async cpf=>{
+    const path=join(dir,'CPI_573987_275064_2026-11-10.pdf');
+    await writeFile(path,'%PDF-1.4\n'+'x'.repeat(150));
+    const latest=await s.findLatest(cpf);latest.status='ready';latest.pdfPaths=[path];
+  };
+}
+/** Ciclo com POST Deskdata contado; o segundo ciclo nunca pode repetir POST, anexo ou envio. */
+function countedCycle(dir,overrides){
+  const counts={posts:0,uploads:0,finalizes:0};
+  const {s,events}=services({outputFolder:dir,
+    submitCpf:async()=>{counts.posts++;return {state:'ready',queryCode:'Q-AAAAAAAAAA',payload:data};},
+    uploadAndSave:async()=>{counts.uploads++;return 'confirmed';},...overrides(counts)});
+  s.savePdf=pdfWriter(dir,s);
+  return {s,events,counts};
+}
 
-test('falha no fechamento persiste pendência após reinício e impede segundo envio',async()=>{
-  const dir=await realpath(await mkdtemp(join(tmpdir(),'deskdata-cpi-close-store-')));
+test('modal conflitante com persistência confirmada: conclui, mas retém o navegador (browserHold), sem reenvio',()=>withCycleDir('ui-warn',async dir=>{
+  const {s,events,counts}=countedCycle(dir,c=>({finalizeSubmitted:async()=>{c.finalizes++;
+    return report({modal:'close_failed',listing:'not_attempted',browserReleased:false});}}));
+  const result=await executeCpiPersonCycle(s);
+  assert.equal(result.state,'completed');assert.deepEqual(result.warnings,['modal_open']);
+  assert.equal(result.browserHold,true);
+  assert.match(result.message,/fechada manualmente/);assert.doesNotMatch(result.message,/próxima solicitação liberada/);
+  assert.ok(events.includes('completed'));assert.equal(events.includes('verification_required'),false);
+  const again=await executeCpiPersonCycle(s);
+  assert.equal(again.state,'completed');assert.deepEqual(counts,{posts:1,uploads:1,finalizes:1});
+}));
+
+test('erro isolado de atualização da listagem não impede concluir nem gera nova consulta',()=>withCycleDir('listing',async dir=>{
+  const {s,counts}=countedCycle(dir,c=>({finalizeSubmitted:async()=>{c.finalizes++;return report({modal:'auto_closed',listing:'stale'});}}));
+  const result=await executeCpiPersonCycle(s);
+  assert.equal(result.state,'completed');assert.deepEqual(result.warnings,['listing_stale']);
+  assert.equal(result.browserHold,undefined,'listagem desatualizada com modal fechado não retém o navegador');
+  await executeCpiPersonCycle(s);
+  assert.deepEqual(counts,{posts:1,uploads:1,finalizes:1});
+}));
+
+test('404 auxiliar com persistência comprovada conclui com aviso',()=>withCycleDir('aux404',async dir=>{
+  const {s,counts}=countedCycle(dir,c=>({uploadAndSave:async()=>{c.uploads++;return 'confirmed_auxiliary_404';},
+    finalizeSubmitted:async()=>{c.finalizes++;return report({auxiliary404:true});}}));
+  const result=await executeCpiPersonCycle(s);
+  assert.equal(result.state,'completed');assert.deepEqual(result.warnings,['auxiliary_404']);
+  assert.match(result.message,/cpi_api_request\.aspx/);
+  assert.deepEqual(counts,{posts:1,uploads:1,finalizes:1});
+}));
+
+for(const [persistence,pattern,browserReleased] of [['absent',/não exibe a resposta completa/,true],['unavailable',/não pôde ser lida/,true],
+  ['absent',/não exibe a resposta completa/,false],['unavailable',/não pôde ser lida/,false]]){
+  test(`persistência ${persistence} (navegador ${browserReleased?'liberado':'retido'}) vira verificação manual, sem reenvio`,()=>withCycleDir(`p-${persistence}`,async dir=>{
+    const {s,events,counts}=countedCycle(dir,c=>({finalizeSubmitted:async()=>{c.finalizes++;
+      return {persistence,auxiliary404:true,modal:'not_attempted',listing:'not_attempted',browserReleased};}}));
+    const result=await executeCpiPersonCycle(s);
+    assert.equal(result.state,'verification_required');assert.match(result.message,pattern);
+    assert.deepEqual(result.warnings,browserReleased?['auxiliary_404']:['auxiliary_404','modal_open']);
+    assert.equal(result.browserHold,browserReleased?undefined:true);
+    assert.equal(events.includes('completed'),false);
+    assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
+    assert.deepEqual(counts,{posts:1,uploads:1,finalizes:1});
+  }));
+}
+
+test('falha inesperada na finalização vira verificação manual e retém o navegador, sem reenvio',()=>withCycleDir('fin-throw',async dir=>{
+  const {s,counts}=countedCycle(dir,c=>({finalizeSubmitted:async()=>{c.finalizes++;throw Error('Shadowbox indisponivel');}}));
+  const result=await executeCpiPersonCycle(s);
+  assert.equal(result.state,'verification_required');assert.equal(result.browserHold,true);
+  assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
+  assert.deepEqual(counts,{posts:1,uploads:1,finalizes:1});
+}));
+
+test('timeout comprovadamente anterior ao envio mantém pdf_ready e retém o navegador sem marcar revisão',()=>withCycleDir('pre-submit-timeout',async dir=>{
+  const {s,events}=countedCycle(dir,c=>({uploadAndSave:async()=>{c.uploads++;return 'not_submitted_held';}}));
+  const result=await executeCpiPersonCycle(s);
+  assert.equal(result.state,'pending');assert.equal(result.browserHold,true);
+  assert.match(result.message,/nenhum envio foi realizado/i);
+  assert.equal((await s.getJob()).stage,'pdf_ready');
+  assert.ok(events.includes('submit_started'));assert.ok(events.includes('not_submitted_proven'));
+  assert.ok(!events.includes('review_required'));assert.ok(!events.includes('verification_required'));
+}));
+
+const protector={isAvailable:async()=>true,encrypt:async text=>Buffer.from(text),decrypt:async bytes=>({result:bytes.toString()})};
+function storeCycle(dir,store,overrides){
   const account='test@example.invalid';
-  const protector={isAvailable:async()=>true,encrypt:async text=>Buffer.from(text),decrypt:async bytes=>({result:bytes.toString()})};
-  try{
-    let store=new CpiWorkflowStore(dir,protector),uploads=0;
-    const {s}=services({
-      outputFolder:dir,
-      getJob:()=>store.get(account,ids),
-      claim:()=>store.claim(account,ids),
-      mark:(stage,updates)=>store.mark(account,ids,stage,updates),
-      savePdf:async cpf=>{
-        const path=join(dir,'CPI_573987_275064_2026-11-10.pdf');
-        await writeFile(path,'%PDF-1.4\n'+'x'.repeat(150));
-        const record=await s.findLatest(cpf);record.status='ready';record.pdfPaths=[path];
-      },
-      uploadAndSave:async()=>{uploads++;return 'confirmed';},
-      closeCompletedDetail:async()=>{throw Error('Fechamento do modal indisponível');}
-    });
-    assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
-    assert.equal((await store.get(account,ids)).stage,'review_required');
-    assert.equal((await store.listPending(account,0,10)).total,1);
-    store=new CpiWorkflowStore(dir,protector);
-    s.getCpf=async()=>{throw Error('Não reabrir solicitação respondida');};
-    assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
-    assert.equal(uploads,1);
-    assert.equal((await store.get(account,ids)).stage,'review_required');
-  }finally{await rm(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
-});
+  const cycle=countedCycle(dir,c=>({getJob:()=>store.current.get(account,ids),claim:()=>store.current.claim(account,ids),
+    mark:(stage,updates)=>store.current.mark(account,ids,stage,updates),...overrides(c)}));
+  return {...cycle,account};
+}
+
+test('prazo estourado na conferência e reabertura do aplicativo: item bloqueado, nenhum POST ou envio repetido',()=>withCycleDir('timeout-reopen',async dir=>{
+  const store={current:new CpiWorkflowStore(dir,protector)};
+  const {s,counts,account}=storeCycle(dir,store,c=>({finalizeSubmitted:async()=>{c.finalizes++;
+    throw Object.assign(new Error('Tempo limite excedido (cpi_verify_save)'),{name:'TimeoutError'});}}));
+  assert.equal((await executeCpiPersonCycle(s)).state,'verification_required');
+  assert.equal((await store.current.get(account,ids)).stage,'verification_required');
+  assert.equal((await store.current.listPending(account,0,10)).total,1);
+  // Reabertura: novo store sobre o mesmo arquivo cifrado; o detalhe nem é reaberto.
+  store.current=new CpiWorkflowStore(dir,protector);
+  s.getCpf=async()=>{throw Error('Não reabrir pesquisa com resultado incerto');};
+  assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
+  assert.deepEqual(await store.current.stages(account,[ids]),['verification_required']);
+  assert.deepEqual(counts,{posts:1,uploads:1,finalizes:1});
+}));
+
+test('envio com prazo estourado (unverified) e reabertura: bloqueado sem segundo POST',()=>withCycleDir('save-timeout',async dir=>{
+  const store={current:new CpiWorkflowStore(dir,protector)};
+  const {s,counts,account}=storeCycle(dir,store,c=>({uploadAndSave:async()=>{c.uploads++;return 'unverified';},
+    finalizeSubmitted:async()=>{c.finalizes++;throw Error('Não conferir envio incerto');}}));
+  assert.equal((await executeCpiPersonCycle(s)).state,'verification_required');
+  store.current=new CpiWorkflowStore(dir,protector);
+  s.getCpf=async()=>{throw Error('Não reabrir');};
+  assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
+  assert.equal((await store.current.get(account,ids)).stage,'verification_required');
+  assert.deepEqual(counts,{posts:1,uploads:1,finalizes:0});
+}));
+
+test('falha ao gravar completed mantém submit_started (bloqueante) e nunca reenvia',()=>withCycleDir('mark-fail',async dir=>{
+  const store={current:new CpiWorkflowStore(dir,protector)};
+  const {s,counts,account}=storeCycle(dir,store,c=>({finalizeSubmitted:async()=>{c.finalizes++;return report();}}));
+  const mark=s.mark;
+  s.mark=async(stage,updates)=>{if(stage==='completed')throw Error('Falha ao persistir a fila CPI.');return mark(stage,updates);};
+  const result=await executeCpiPersonCycle(s);
+  assert.equal(result.state,'review_required');assert.match(result.message,/conclusão local não foi gravada/);
+  assert.equal((await store.current.get(account,ids)).stage,'submit_started');
+  assert.equal((await store.current.listPending(account,0,10)).total,1);
+  store.current=new CpiWorkflowStore(dir,protector);
+  s.getCpf=async()=>{throw Error('Não reabrir');};
+  assert.equal((await executeCpiPersonCycle(s)).state,'review_required');
+  assert.deepEqual(counts,{posts:1,uploads:1,finalizes:1});
+}));
 
 // ---------- modo ensaio (somente desenvolvimento) ----------
 function rehearsalServices(overrides={}){
@@ -243,7 +328,7 @@ test('ensaio: não marca submit_started, usa dry_run, fecha sem salvar e devolve
   const {s,events}=rehearsalServices({outputFolder:dir,
     savePdf:async(_cpf,_id)=>{await writeFile(pdfPath,'%PDF-1.4\n'+'x'.repeat(200));s.__record.pdfPaths.push(pdfPath);},
     uploadAndSave:async(_path,_result,mode)=>{modes.push(mode);return 'dry_run_ok';},
-    closeCompletedDetail:async()=>{throw Error('Não fechar como concluída no ensaio');}});
+    finalizeSubmitted:async()=>{throw Error('Não finalizar no ensaio');}});
   s.__record=await s.findLatest();
   const result=await executeCpiPersonCycle(s);
   assert.equal(result.state,'dry_run');

@@ -167,6 +167,24 @@ export class CpiWorkflowStore {
       db.items[index]=after;await this.write(db);return after;
     });
   }
+  /**
+   * Reabre somente o checkpoint local cujo adaptador comprovou não ter produzido efeito remoto.
+   * A transição não está disponível em `mark()`: estados incertos ou finais continuam irreversíveis.
+   */
+  async recordNotSubmitted(account:string,ids:CpiPendingRowId):Promise<CpiWorkItem>{
+    if(!validateCpiRowId(ids)||!account.trim())throw new Error('Identificação CPI inválida.');
+    return this.locked(async()=>{
+      const db=await this.read();
+      const index=db.items.findIndex(row=>key(row.account,row)===key(account,ids));
+      if(index<0||db.items[index].stage!=='submit_started')throw new Error('A pesquisa não está em envio iniciado; retorno automático bloqueado.');
+      const before=db.items[index];
+      if(!before.historyRecordId||!before.classification)throw new Error('Vínculo local CPI incompleto; retorno automático bloqueado.');
+      const after:CpiWorkItem={...before,stage:'pdf_ready',updatedAt:new Date().toISOString()};
+      delete after.submittedAt;
+      if(!valid(after))throw new Error('Tentativa de persistir estado CPI inválido.');
+      db.items[index]=after;await this.write(db);return after;
+    });
+  }
   /** A única transição de reconciliação é calculada após prova remota; o renderer não escolhe o estado. */
   async recordVerification(account:string,ids:CpiPendingRowId,reason:CpiVerificationReason):Promise<CpiWorkItem>{
     if(!validateCpiRowId(ids)||typeof account!=='string'||!account.trim()||!verificationReasons.has(reason))throw new Error('Verificação CPI inválida.');

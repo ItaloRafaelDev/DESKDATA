@@ -6,6 +6,7 @@ import { assertCpiPaidBalance } from './paid-balance.ts';
 import { safeCpiCycleError, type CpiScanContext, type CpiScanResult } from './full-auto-runner.ts';
 import { classifyCpiError, CPI_IMMEDIATE_STOP } from './failure-classes.ts';
 import { CPI_FINAL_STAGES } from './queue-selection.ts';
+import { CpiFilterStepError } from './pending-filter.ts';
 import { executeCpiPersonCycle } from './full-cycle.ts';
 import { account, showHistoryChange, timedCycle, type MainContext } from '../ipc/context.ts';
 
@@ -28,8 +29,12 @@ async function cpiScanOneTimed(ctx: MainContext, timer: StepTimer, context: CpiS
   if (!settings.outputFolder) throw new Error('Configure uma pasta de PDFs antes da automação CPI.');
   let filtered: Awaited<ReturnType<CpiBrowser['filterPendingPerson29']>>;
   // A causa original é preservada para a classificação (sessão, layout, tempo limite); a mensagem exibida é sanitizada.
-  try { filtered = await timer.step('cpi_filter', () => cpiBrowser.filterPendingPerson29()); }
-  catch (error) { throw new Error('Etapa filtro CPI 29: falha ao atualizar a listagem.', { cause: error }); }
+  try { filtered = await timer.step('cpi_filter', () => cpiBrowser.filterPendingPerson29(timer)); }
+  catch (error) {
+    const safeDetail=error instanceof CpiFilterStepError||classifyCpiError(error)==='cpi_operational'
+      ?(error as Error).message:'falha ao atualizar a listagem.';
+    throw new Error(`Etapa filtro CPI 29: ${safeDetail}`, { cause: error });
+  }
   if (filtered.state === 'unconfirmed' || filtered.total === null) throw new Error('Etapa filtro CPI 29: total nao confirmado no portal.');
   if (filtered.total === 0) return { kind: 'idle', found: 0 };
   let listed: Awaited<ReturnType<CpiBrowser['inspectPendingRows']>>;
@@ -75,6 +80,7 @@ function cpiProcessItem(ctx: MainContext, timer: StepTimer, who: string, target:
     getJob: () => cpiWorkflow.get(who, target),
     claim: () => cpiWorkflow.claim(who, target),
     mark: (stage, updates) => cpiWorkflow.mark(who, target, stage, updates),
+    recordNotSubmitted: () => cpiWorkflow.recordNotSubmitted(who, target),
     findLatest: cpf => history.findLatest(who, cpf, 'person'),
     beginHistory: cpf => history.begin(who, cpf, 'person'),
     setQueryCode: (recordId, code) => history.setCode(recordId, code),
@@ -88,7 +94,7 @@ function cpiProcessItem(ctx: MainContext, timer: StepTimer, who: string, target:
       if (ctx.session.account !== who) throw new Error('Conta Deskdata alterada durante o processamento CPI.');
       return cpiBrowser.uploadAndSavePersonResponse(target, pdf, result, undefined, timer, mode);
     },
-    closeCompletedDetail: () => cpiBrowser.closeCompletedDetail(target),
+    finalizeSubmitted: () => cpiBrowser.finalizeSubmittedResponse(target),
     dryRun: ctx.cpiRehearsal,
     closeWithoutSaving: () => cpiBrowser.closeDetailWithoutSaving(target)
   });

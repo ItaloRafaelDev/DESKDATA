@@ -89,5 +89,3 @@ docs/           Documentação técnica
 ## Versões
 
 A branch `main` contém a base estável anterior (`v0.1.13`). A branch `feature/cpi-automation` reúne o desenvolvimento da automação CPI (`v0.1.14-dev.1`) e ainda exige homologação para um release de distribuição.
-
-Documentação da API: https://docs.deskdata.com.br/reference/início

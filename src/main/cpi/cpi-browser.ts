@@ -2,7 +2,8 @@ import { chromium, type Browser, type BrowserContext, type Page, type Frame, typ
 import { filterPendingPerson29, readListingCount, type CpiPendingFilterResult } from './pending-filter.ts';
 import { inspectPendingPerson29Rows, validateCpiRowId, type CpiPendingRowId, type CpiPendingRowsInspection } from './pending-rows.ts';
 import { validateCpiPersonDetails, resolveCpiDetailHeadings, matchesCpiDetailHeadings, readCpiDetailDom, type CpiDetailDomSnapshot, type CpiRawPersonDetails, type CpiPendingPersonDetail } from './pending-details.ts';
-import { classifyCpiVisibleServerError, hasConfirmedSavedCpiResponse, type CpiSavedResponseEvidence } from './response-confirmation.ts';
+import { classifyCpiHttpResponse, classifyCpiVisibleServerError, hasConfirmedSavedCpiResponse, judgeSavedCpiResponse, savedResponseEvidenceFromDom,
+  type CpiFinalizeReport, type CpiPersistenceVerdict, type CpiSavedResponseEvidence } from './response-confirmation.ts';
 import { refreshPendingAfterConfirmedSave } from './pending-refresh.ts';
 import { basename } from 'node:path';
 import { cpfDigits, isValidCpf } from '../../shared/cpf.ts';
@@ -22,8 +23,12 @@ const CPI_HOST = 'adm.cpicentral.com.br';
 export const CPI_OPERATION_TIMEOUTS = {
   open: 75_000, focus: 5_000, close: 15_000, inspect: 20_000, filter: 150_000, rows: 30_000,
   detail: 45_000, save: 60_000, closeDetail: 75_000, reconcile: 45_000,
+  /** Leitura independente (GET em aba transitória) da resposta salva, antes de concluir. */
+  verifySave: 30_000,
   /** Espera por um campo do formulário de resposta (ex.: radios que surgem após o Status). */
-  fieldWait: 10_000
+  fieldWait: 10_000,
+  /** Leitura da visibilidade do modal para a liberação operacional (falha ou estouro = aberto). */
+  modalState: 3_000
 };
 export type CpiOperationTimeouts = typeof CPI_OPERATION_TIMEOUTS;
 /** Estado do salvamento visível ao chamador, que decide no estouro do prazo sem esperar o corpo. */
@@ -48,9 +53,12 @@ export class CpiBrowser {
   private lastFilter: {result: CpiPendingFilterResult; pageUrl: string; checkedAt: number} | null = null;
   private lastMappedRows: CpiPendingRowId[] = [];
   private lastReadCpf: {ids: CpiPendingRowId; cpf: string; frame:Frame} | null = null;
-  private lastConfirmedSave: (CpiPendingRowId & {frame:Frame}) | null = null;
+  /** Envio aceito pelo formulário (ainda sem prova de persistência) e o que é preciso para conferi-lo. */
+  private lastConfirmedSave: (CpiPendingRowId & {frame:Frame;url:string;cpf:string;classification:CpiResultClassification;auxiliary404:boolean}) | null = null;
   /** Abortado por `close()`: toda operação em curso para no próximo ponto de verificação. */
   private session = new AbortController();
+  /** Pendência operacional (motivo exibível, sem dados pessoais): janela de pesquisa submetida ainda aberta. */
+  private operationalHold: string | null = null;
   private readonly timeouts: CpiOperationTimeouts;
   constructor(timeouts: Partial<CpiOperationTimeouts> = {}) { this.timeouts = {...CPI_OPERATION_TIMEOUTS, ...timeouts}; }
 
@@ -90,7 +98,7 @@ export class CpiBrowser {
       this.browser = browser;
       this.context = context;
       this.page = page;
-      browser.on('disconnected', () => { if (this.browser === browser) { this.browser = null; this.context = null; this.page = null; this.lastFilter = null; this.lastMappedRows = []; this.lastReadCpf = null; this.lastConfirmedSave = null; } });
+      browser.on('disconnected', () => { if (this.browser === browser) { this.browser = null; this.context = null; this.page = null; this.lastFilter = null; this.lastMappedRows = []; this.lastReadCpf = null; this.lastConfirmedSave = null; this.operationalHold = null; } });
       await page.goto(CPI_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
       throwIfAborted(signal, 'cpi_open');
       return this.status();
@@ -140,7 +148,7 @@ export class CpiBrowser {
     if (!framesInspected) throw new Error('A página ativa não pertence ao domínio administrativo CPI.');
     return { controls, truncated, framesInspected };
   }
-  async filterPendingPerson29(): Promise<CpiPendingFilterResult> {
+  async filterPendingPerson29(timer:Pick<StepTimer,'step'>=NULL_TIMER): Promise<CpiPendingFilterResult> {
     if (this.status().state !== 'open' || !this.page) throw new Error('Abra e autentique primeiro o navegador CPI.');
     this.lastFilter = null;
     this.lastMappedRows = [];
@@ -148,7 +156,15 @@ export class CpiBrowser {
     this.lastConfirmedSave = null;
     const page = this.page;
     return this.bounded('cpi_filter', this.timeouts.filter, async signal => {
-      const result = await filterPendingPerson29(page, signal);
+      await timer.step('cpi_filter_modal',async()=>{
+        await this.assertOperationalRelease(signal);
+        if (await this.modalOpen(page,signal)) {
+          this.operationalHold = 'uma janela modal já estava aberta antes do filtro; o portal precisa voltar à listagem.';
+          this.lastFilter = null; this.lastMappedRows = []; this.lastReadCpf = null; this.lastConfirmedSave = null;
+          throw new Error(`Pendência operacional CPI: ${this.operationalHold} Feche a janela manualmente na CPI antes de continuar; nenhuma pesquisa será aberta até lá.`);
+        }
+      });
+      const result = await filterPendingPerson29(page, signal, timer);
       // Resultado tardio de uma operação já expirada nunca vira estado válido.
       throwIfAborted(signal, 'cpi_filter');
       if (result.total !== null && result.state !== 'unconfirmed') {
@@ -160,6 +176,7 @@ export class CpiBrowser {
   /** Lê a tabela que já está na tela; nunca abre o modal de filtros novamente. */
   async inspectPendingRows(): Promise<CpiPendingRowsInspection> {
     if (this.status().state !== 'open' || !this.page) throw new Error('Abra e autentique primeiro o navegador CPI.');
+    await this.assertOperationalRelease();
     this.lastMappedRows = [];
     this.lastReadCpf = null;
     this.lastConfirmedSave = null;
@@ -185,6 +202,7 @@ export class CpiBrowser {
   /** Abre somente o formulário existente de um registro mapeado; não salva nem consulta a Deskdata. */
   async inspectPendingPersonDetails(ids: CpiPendingRowId, timer: Pick<StepTimer,'begin'> = NULL_TIMER): Promise<CpiPendingPersonDetail> {
     if (this.status().state !== 'open' || !this.page) throw new Error('Abra e autentique primeiro o navegador CPI.');
+    await this.assertOperationalRelease();
     if (!validateCpiRowId(ids) || !this.lastMappedRows.some(row =>
       row.pesquisaId === ids.pesquisaId && row.solicitacaoId === ids.solicitacaoId)) {
       throw new Error('A pesquisa não foi identificada e validada na listagem atual.');
@@ -317,22 +335,7 @@ export class CpiBrowser {
   private async savedResponseEvidence(frame:Frame,ids:CpiPendingRowId,classification:'restrictions'|'information'):Promise<CpiSavedResponseEvidence|null>{
     const current=await this.readDetailFrame(ids);
     if(!current||current.frame!==frame)return null;
-    const dom=current.dom;
-    const norm=(value:string)=>value.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim().toUpperCase();
-    if(norm(dom.savedSource)!=='DESK DATA')return null;
-    const result=norm(dom.savedResult);
-    const correct=classification==='restrictions'
-      ? /^SIM\s*,?\s*CONSTA RESTRICOES$/.test(result)
-      : result==='HA INFORMACOES';
-    const timestamp=dom.responseTimestamp.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s|$)/);
-    const day=Number(timestamp?.[1]),month=Number(timestamp?.[2]),year=Number(timestamp?.[3]);
-    const date=new Date(Date.UTC(year,month-1,day));
-    const validDate=!!timestamp&&date.getUTCFullYear()===year&&date.getUTCMonth()===month-1&&date.getUTCDate()===day;
-    const errors=classifyCpiVisibleServerError(dom.errorSignals);
-    return {matchingIds:true,statusRespondida:norm(dom.savedStatus)==='RESPONDIDA',matchingResult:correct,
-      hasResponseTimestamp:validDate,
-      hasPdfDocument:norm(dom.pdfDocument)==='DOCUMENTO PDF',
-      editableUploadPresent:dom.editableUploadPresent,serverErrorVisible:errors.blocking||dom.businessErrorVisible,auxiliary404Observed:errors.auxiliary404};
+    return savedResponseEvidenceFromDom(current.dom,classification);
   }
 
   /** Reconciliação somente leitura do detalhe aberto manualmente, sem navegar, anexar ou submeter. */
@@ -362,10 +365,10 @@ export class CpiBrowser {
   /** Prova final pela listagem; injetável em testes (o fixture do formulário não tem listagem real). */
   private refreshAfterSave: typeof refreshPendingAfterConfirmedSave = refreshPendingAfterConfirmedSave;
 
-  /** Fecha a Shadowbox "Responder / Atualizar Pesquisa" pelo controle único do portal. */
-  private async closeShadowbox(page: Page, signal: AbortSignal, label: string): Promise<void> {
+  /** Fecha a Shadowbox "Responder / Atualizar Pesquisa" pelo controle único do portal; nunca fecha duas vezes. */
+  private async closeShadowbox(page: Page, signal: AbortSignal, label: string): Promise<'closed'|'already_hidden'> {
     const modal = page.locator('#sb-container');
-    if (!await modal.isVisible().catch(() => false)) return;
+    if (!await modal.isVisible().catch(() => false)) return 'already_hidden';
     const title = (await page.locator('#sb-title-inner').innerText({timeout:4000})).trim();
     if (!/Responder\s*\/\s*Atualizar Pesquisa/i.test(title)) {
       throw new Error('Modal CPI inesperado. Fechamento manual necessário.');
@@ -377,30 +380,126 @@ export class CpiBrowser {
     throwIfAborted(signal, label);
     await button.evaluate(element => (element as HTMLElement).click());
     await modal.waitFor({state:'hidden',timeout:7000});
+    return 'closed';
   }
 
   /**
-   * Depois de um envio aceito: fecha o modal se a CPI não voltou sozinha para a lista e só libera a próxima
-   * pesquisa quando a listagem atualizada não contém mais a pesquisa respondida (prova de persistência).
+   * Prova independente de persistência: GET da URL exata do formulário em uma aba transitória do mesmo
+   * contexto, sem tocar no modal, sem POST e sem clicar em nada. Confere IDs, CPF (quando exibido),
+   * Status, classificação, data, fonte e a indicação "Documento PDF". O 404 conhecido de cpi_api_request.aspx
+   * é só aviso; outra falha desse recurso torna a leitura indisponível.
+   * Limite: "Documento PDF" é o texto exibido pelo portal. Não há identificador, nome, hash ou tamanho do anexo
+   * conferível só por leitura; o arquivo não é baixado nem aberto. A conclusão afirma a indicação, não o arquivo.
    */
-  async closeCompletedDetail(ids: CpiPendingRowId): Promise<void> {
-    if (!this.page || this.status().state !== 'open' || !this.lastConfirmedSave ||
-        this.lastConfirmedSave.pesquisaId !== ids.pesquisaId ||
-        this.lastConfirmedSave.solicitacaoId !== ids.solicitacaoId) {
+  private async probePersisted(page: Page, saved: NonNullable<CpiBrowser['lastConfirmedSave']>, signal: AbortSignal): Promise<{verdict:CpiPersistenceVerdict;auxiliary404:boolean}> {
+    let auxiliary404 = false, auxiliaryFailed = false;
+    const probe = await page.context().newPage();
+    probe.on('response', response => {
+      try {
+        const request = response.request();
+        const verdict = classifyCpiHttpResponse({url:response.url(),status:response.status(),
+          mainDocument:request.frame() === probe.mainFrame() && request.isNavigationRequest()});
+        if (verdict === 'auxiliary_404') auxiliary404 = true;
+        else if (verdict === 'auxiliary_failed') auxiliaryFailed = true;
+      } catch { /* resposta não pertinente */ }
+    });
+    try {
+      throwIfAborted(signal, 'cpi_verify_save');
+      const response = await probe.goto(saved.url, {waitUntil:'domcontentloaded', timeout:15000}).catch(() => null);
+      if (!response || classifyCpiHttpResponse({url:response.url(),status:response.status(),mainDocument:true}) === 'main_failed') return {verdict:'unavailable',auxiliary404};
+      await probe.waitForLoadState('load', {timeout:5000}).catch(() => undefined);
+      // Requisições assíncronas (como cpi_api_request.aspx) podem responder depois do `load`: aguardar a rede
+      // ociosa, com prazo, para que uma falha auxiliar tardia não passe despercebida.
+      await probe.waitForLoadState('networkidle', {timeout:4000}).catch(() => undefined);
+      throwIfAborted(signal, 'cpi_verify_save');
+      if (auxiliaryFailed) return {verdict:'unavailable',auxiliary404};
+      const loaded = new URL(probe.url());
+      if (loaded.protocol !== 'https:' || loaded.hostname !== CPI_HOST || loaded.pathname.toLowerCase() === CPI_FORM.loginPath ||
+          loaded.searchParams.get('id_sol') !== saved.solicitacaoId || loaded.searchParams.get('id_pesq_tipo') !== saved.pesquisaId) {
+        return {verdict:'unavailable',auxiliary404};
+      }
+      const dom = await probe.mainFrame().evaluate(readCpiDetailDom);
+      const headings = resolveCpiDetailHeadings(dom.titles);
+      if (!headings || !matchesCpiDetailHeadings(saved, headings) || (dom.cpfText && cpfDigits(dom.cpfText) !== saved.cpf)) {
+        return {verdict:'unavailable',auxiliary404};
+      }
+      const evidence = savedResponseEvidenceFromDom(dom, saved.classification);
+      // Reconferido após a leitura: falha auxiliar que chegou durante a avaliação também invalida.
+      if (auxiliaryFailed) return {verdict:'unavailable',auxiliary404};
+      return {verdict:judgeSavedCpiResponse(evidence),auxiliary404:auxiliary404||evidence.auxiliary404Observed};
+    } finally {
+      await probe.close().catch(() => undefined);
+      await page.bringToFront().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Depois de um envio aceito pelo formulário, em três fases independentes:
+   * 1. persistência: leitura independente da resposta salva (único critério para concluir);
+   * 2. modal: se o portal já fechou, nada é clicado; se continua aberto, fecha pelo controle `Shadowbox.close()`;
+   * 3. listagem: "Mostrar Tudo" e conferência de que a pesquisa saiu da lista (efeito visual).
+   * Falhas de modal ou listagem não alteram o veredito de persistência e nunca levam a reenvio.
+   * Sem persistência comprovada o modal fica como está, para a verificação manual.
+   */
+  async finalizeSubmittedResponse(ids: CpiPendingRowId): Promise<CpiFinalizeReport> {
+    const saved = this.lastConfirmedSave;
+    if (!this.page || this.status().state !== 'open' || !saved ||
+        saved.pesquisaId !== ids.pesquisaId || saved.solicitacaoId !== ids.solicitacaoId) {
       throw new Error('Fechamento CPI bloqueado: resposta não confirmada para esta solicitação.');
     }
     const page = this.page;
-    // Prazo estourado: o chamador mantém a pesquisa em revisão (nunca reenvia) e a listagem é relida no próximo ciclo.
-    await this.bounded('cpi_close_detail', this.timeouts.closeDetail, async signal => {
-      // Após o POST o iframe pode exibir outro documento: não exigir mais o formulário original aqui.
-      await this.closeShadowbox(page, signal, 'cpi_close_detail');
-      await this.refreshAfterSave(page, ids, 20000, signal);
-      throwIfAborted(signal, 'cpi_close_detail');
-    });
-    this.lastFilter = null;
-    this.lastMappedRows = [];
-    this.lastReadCpf = null;
-    this.lastConfirmedSave = null;
+    // Uma única conferência por envio: o estado é consumido mesmo em falha.
+    this.lastFilter = null; this.lastMappedRows = []; this.lastReadCpf = null; this.lastConfirmedSave = null;
+    let probe: {verdict:CpiPersistenceVerdict;auxiliary404:boolean};
+    try { probe = await this.bounded('cpi_verify_save', this.timeouts.verifySave, signal => this.probePersisted(page, saved, signal)); }
+    catch { probe = {verdict:'unavailable', auxiliary404:false}; }
+    const auxiliary404 = saved.auxiliary404 || probe.auxiliary404;
+    if (probe.verdict !== 'confirmed') {
+      // Modal preservado para a verificação manual: o navegador fica retido até o operador fechá-lo.
+      const browserReleased = await this.releaseUnlessModalOpen(page, 'envio sem persistência comprovada; a janela da pesquisa foi mantida para verificação manual.');
+      return {persistence:probe.verdict, auxiliary404, modal:'not_attempted', listing:'not_attempted', browserReleased};
+    }
+    let modal: CpiFinalizeReport['modal'] = 'close_failed';
+    let listing: CpiFinalizeReport['listing'] = 'not_attempted';
+    try {
+      await this.bounded('cpi_close_detail', this.timeouts.closeDetail, async signal => {
+        // Após o POST o iframe pode exibir outro documento: não exigir mais o formulário original aqui.
+        modal = await this.closeShadowbox(page, signal, 'cpi_close_detail') === 'closed' ? 'closed' : 'auto_closed';
+        listing = 'stale';
+        await this.refreshAfterSave(page, ids, 20000, signal);
+        throwIfAborted(signal, 'cpi_close_detail');
+        listing = 'refreshed';
+      });
+    } catch { /* Efeito visual: o veredito de persistência já está decidido. */ }
+    // Liberação operacional separada da persistência: o estado do modal é relido, sem confiar no resultado do clique.
+    const browserReleased = await this.releaseUnlessModalOpen(page, 'resposta confirmada na CPI, mas a janela da pesquisa continua aberta.');
+    return {persistence:'confirmed', auxiliary404, modal, listing, browserReleased};
+  }
+
+  /** Lê a visibilidade do modal com prazo próprio; falha ou estouro contam como aberto (fail-closed). */
+  private async modalOpen(page: Page, signal?:AbortSignal): Promise<boolean> {
+    try { return await runWithDeadline('cpi_modal_state',this.timeouts.modalState,
+      ()=>page.locator('#sb-container').isVisible(),signal); }
+    catch(error) { if(signal?.aborted)throw error;return true; }
+  }
+  /** Retém o navegador (pendência operacional) se o modal continua aberto; devolve se ficou liberado. */
+  private async releaseUnlessModalOpen(page: Page, reason: string): Promise<boolean> {
+    if (!await this.modalOpen(page)) return true;
+    this.operationalHold = reason;
+    // Sem identidade nem listagem reutilizáveis: um novo envio exigiria reabrir o detalhe, que está bloqueado.
+    this.lastFilter = null; this.lastMappedRows = []; this.lastReadCpf = null;
+    return false;
+  }
+  /**
+   * Pendência operacional: nenhuma leitura de listagem, abertura de pesquisa ou envio enquanto a janela de uma
+   * pesquisa já submetida continuar aberta. Liberada sozinha quando o modal some (fechado pelo operador) ou ao
+   * fechar o navegador; nunca reabre a pesquisa nem repete POST, anexo ou consulta.
+   */
+  private async assertOperationalRelease(signal?:AbortSignal): Promise<void> {
+    const reason = this.operationalHold;
+    if (!reason) return;
+    if (this.page && this.status().state === 'open' && !await this.modalOpen(this.page,signal)) { this.operationalHold = null; return; }
+    throw new Error(`Pendência operacional CPI: ${reason} Feche a janela manualmente na CPI antes de continuar; nenhuma pesquisa será aberta até lá.`);
   }
 
   /** Modo ensaio: fecha o formulário ainda não salvo da mesma pesquisa, sem enviar nada. */
@@ -424,17 +523,27 @@ export class CpiBrowser {
    * Status → aguardar radios → Fonte → Resultado (pelo rótulo) → conferir → anexar PDF → conferir → Alterar → OK.
    * `dry_run` faz tudo, mas cancela o diálogo de confirmação (nada é salvo).
    */
-  async uploadAndSavePersonResponse(ids: CpiPendingRowId, pdfPath: string, classification: CpiResultClassification, confirmationTimeoutMs=20000, timer: Pick<StepTimer,'begin'> = NULL_TIMER, mode: 'save'|'dry_run' = 'save'): Promise<'confirmed' | 'confirmed_auxiliary_404' | 'unverified' | 'not_submitted' | 'dry_run_ok'> {
+  async uploadAndSavePersonResponse(ids: CpiPendingRowId, pdfPath: string, classification: CpiResultClassification, confirmationTimeoutMs=20000, timer: Pick<StepTimer,'begin'> = NULL_TIMER, mode: 'save'|'dry_run' = 'save'): Promise<'confirmed' | 'confirmed_auxiliary_404' | 'unverified' | 'not_submitted' | 'not_submitted_held' | 'dry_run_ok'> {
+    // Sem verificação de pendência aqui: o envio exige o CPF lido por `inspectPendingPersonDetails` (que verifica),
+    // e a pendência descarta essa leitura. Recusar aqui viraria verificação manual de algo nunca enviado.
     const progress: SaveProgress = {effectsPossible:false, endStep:null};
+    let result: Awaited<ReturnType<CpiBrowser['saveResponse']>>;
     try {
-      return await this.bounded('cpi_save', this.timeouts.save + confirmationTimeoutMs, signal =>
+      result = await this.bounded('cpi_save', this.timeouts.save + confirmationTimeoutMs, signal =>
         this.saveResponse(ids, pdfPath, classification, confirmationTimeoutMs, timer, signal, progress, mode));
     } catch (error) {
       // Só prazo estourado ou cancelamento chegam aqui (o corpo converte as próprias falhas).
       // Nunca repetir: com efeito possível o resultado é incerto ('unverified' → verification_required).
       progress.endStep?.('failed', error);
-      return progress.effectsPossible ? 'unverified' : 'not_submitted';
+      result = progress.effectsPossible ? 'unverified' : 'not_submitted';
     }
+    // Envio incerto com a janela aberta: o navegador fica retido até o operador conferir e fechar.
+    if (result === 'unverified' && this.page) await this.releaseUnlessModalOpen(this.page, 'envio sem confirmação; a janela da pesquisa foi mantida para verificação manual.');
+    if (result === 'not_submitted' && this.page && !await this.releaseUnlessModalOpen(this.page,
+      'nenhum envio foi realizado, mas a janela da pesquisa continua aberta e precisa ser fechada manualmente.')) {
+      return 'not_submitted_held';
+    }
+    return result;
   }
 
   /** Exatamente um controle para o seletor, aguardando a renderização (polling de 250 ms). */
@@ -505,7 +614,7 @@ export class CpiBrowser {
    * Espera o formulário ser deixado após o OK: o iframe navega (resposta do POST) ou some, ou a Shadowbox
    * fecha. Login, HTTP de erro, alert de erro ou texto de erro na resposta tornam o envio incerto.
    */
-  private async waitForFormExit(page: Page, frame: Frame, state: {navigated:boolean;failed:boolean}, timeoutMs: number, signal: AbortSignal): Promise<'left'|'failed'|'timeout'> {
+  private async waitForFormExit(page: Page, frame: Frame, state: {navigated:boolean;failed:boolean;auxiliary404:boolean}, timeoutMs: number, signal: AbortSignal): Promise<'left'|'failed'|'timeout'> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       throwIfAborted(signal, 'cpi_save');
@@ -521,11 +630,22 @@ export class CpiBrowser {
             // Página de erro do navegador, outro domínio ou login: a resposta do POST não é do portal autenticado.
             if (current.protocol !== 'https:' || current.hostname !== CPI_HOST ||
                 current.pathname.toLowerCase() === CPI_FORM.loginPath) return 'failed';
-            const error = await frame.evaluate(() => {
-              const text = (document.body?.innerText ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-              return /(?:ERRO|FALHA)\s+(?:AO|NO|NA)\s|NAO FOI POSSIVEL|NAO AUTORIZADO|ERRO DE SERVIDOR/.test(text);
+            // N\u00f3s de texto separados e sem <script>/<style>: com o modal oculto, innerText vira textContent
+            // e colaria o c\u00f3digo do script ao texto do erro, escondendo o 404 auxiliar.
+            const text = await frame.evaluate(() => {
+              const parts: string[] = [];
+              if (document.body) {
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                  if (!node.parentElement?.closest('script,style,noscript,template')) parts.push(node.nodeValue ?? '');
+                }
+              }
+              return parts.join(' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().slice(0, 20000);
             });
-            if (error) return 'failed';
+            // Erro de servidor s\u00f3 bloqueia quando n\u00e3o \u00e9 o 404 conhecido do recurso auxiliar cpi_api_request.aspx.
+            const server = classifyCpiVisibleServerError(text);
+            if (server.auxiliary404) state.auxiliary404 = true;
+            if (server.blocking || /(?:ERRO|FALHA)\s+(?:AO|NO|NA)\s|NAO FOI POSSIVEL|NAO AUTORIZADO/.test(text)) return 'failed';
           } catch { /* Documento em troca: a prova final é a listagem. */ }
         }
         return 'left';
@@ -603,7 +723,7 @@ export class CpiBrowser {
     progress.endStep?.('success');
     beginStep('cpi_save');
     throwIfAborted(signal, 'cpi_save');
-    const state={navigated:false,failed:false};
+    const state={navigated:false,failed:false,auxiliary404:false};
     let dialogSeen=false;
     const onDialog=(dialog:import('playwright-core').Dialog)=>{
       // O confirm de salvamento é tratado pelo waitForEvent abaixo; aqui só alerts posteriores.
@@ -613,9 +733,18 @@ export class CpiBrowser {
       void dialog.accept().catch(()=>{});
     };
     const onNavigation=(changed:Frame)=>{if(changed===frame&&dialogSeen)state.navigated=true;};
+    // Documento principal = navegação do frame do formulário (POST de Alterar e o que ele carregar).
+    // Recursos auxiliares (outros frames, XHR, cpi_api_request.aspx) não invalidam o formulário.
     const onResponse=(response:import('playwright-core').Response)=>{
-      try{if(dialogSeen&&response.request().frame()===frame&&response.request().isNavigationRequest()&&response.status()>=400)state.failed=true;}
-      catch{/* resposta não pertinente */}
+      try{
+        if(!dialogSeen)return;
+        const request=response.request();
+        const verdict=classifyCpiHttpResponse({url:response.url(),status:response.status(),
+          mainDocument:request.frame()===frame&&request.isNavigationRequest()});
+        if(verdict==='auxiliary_404')state.auxiliary404=true;
+        // Falha do documento principal ou falha não observada do recurso auxiliar: envio incerto, nunca mascarado.
+        else if(verdict==='main_failed'||verdict==='auxiliary_failed')state.failed=true;
+      }catch{/* resposta não pertinente */}
     };
     page.on('dialog',onDialog);
     page.on('framenavigated',onNavigation);
@@ -648,9 +777,10 @@ export class CpiBrowser {
       await clickPromise;
       const exit=await this.waitForFormExit(page,frame,state,confirmationTimeoutMs,signal);
       if(exit!=='left')return 'unverified';
-      this.lastConfirmedSave = {...ids,frame};
+      // Formulário aceito, ainda sem prova de persistência: `finalizeSubmittedResponse` faz a leitura independente.
+      this.lastConfirmedSave = {...ids,frame,url:frameUrl.href,cpf:checked.cpf,classification,auxiliary404:state.auxiliary404};
       saved=true;
-      return 'confirmed';
+      return state.auxiliary404?'confirmed_auxiliary_404':'confirmed';
     }finally{
       page.off('dialog',onDialog);
       page.off('framenavigated',onNavigation);
@@ -673,6 +803,8 @@ export class CpiBrowser {
     const browser = this.browser;
     this.browser = null; this.context = null; this.page = null;
     this.lastFilter = null; this.lastMappedRows = []; this.lastReadCpf = null; this.lastConfirmedSave = null;
+    // Nova sessão do navegador: a janela retida deixa de existir junto com o processo.
+    this.operationalHold = null;
     if (browser) await this.closeBrowser(browser);
   }
 }
