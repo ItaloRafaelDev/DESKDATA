@@ -27,6 +27,10 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 - A escolha da pasta dos PDFs não bloqueia mais as outras operações enquanto o diálogo está aberto. Se a sessão mudar ou o aplicativo começar a encerrar, nada é gravado.
 - Sem resposta em 2 min, a confirmação da limpeza local fecha sozinha e vale "Cancelar". O mesmo acontece ao encerrar o aplicativo.
 - Concorrência unificada: uma única porta de operações (`OperationGate`) controla consultas, limpeza, troca de sessão, automação CPI e encerramento, no lugar das marcações espalhadas pelo processo principal. As recusas mantêm as mensagens de antes, e toda operação é liberada ao terminar, falhar ou ser cancelada.
+- Processo principal separado por domínio: `index.ts` só inicializa e compõe; os canais ficam em `src/main/ipc/` (autenticação, pessoa, PIS, CNPJ, CPI, manutenção, configurações) e a varredura do FULL AUTO em `cpi/full-auto-orchestrator.ts`. Os nomes de canal existem só no contrato tipado `src/shared/ipc-contract.ts`, usado pelo preload e pelo processo principal.
+- Os canais de inspeção manual da CPI (inspecionar portal, filtro 29, linhas, detalhes, histórico da pessoa, preparar PDF) não são mais registrados no aplicativo instalado; continuam disponíveis no ambiente de desenvolvimento.
+- O backup não trava mais a janela enquanto compacta: a compressão roda fora do processo principal e o CRC usa a implementação nativa do zlib. O formato do ZIP não mudou.
+- O histórico da aba CPI lê os registros das 100 respostas mais recentes de uma só vez, em vez de um por um a cada pesquisa concluída, e deixa de competir com as gravações do agente.
 
 ### Corrigido
 - Testes CPI comparavam caminhos temporários não canônicos; falhavam no runner Windows (TEMP com nome 8.3).
