@@ -72,7 +72,8 @@ export function readCpiDetailDom():CpiDetailDomSnapshot {
     .find(text=>/aguardando pesquisa|respondida/i.test(text));
   const signals=[...visibleText.matchAll(/ERRO DE SERVIDOR NO APLICATIVO|NAO E POSSIVEL ENCONTRAR O RECURSO|SERVER ERROR IN/g)].map(match=>match[0]);
   if(/404;404;|HTTP\s*404|\b404\b/.test(visibleText))signals.push('404;404;');
-  if(/URL SOLICITADA\s*:\s*\/?CPI_API_REQUEST\.ASPX\b/.test(visibleText))signals.push('URL SOLICITADA: /CPI_API_REQUEST.ASPX');
+  // Mesmo padrão de CPI_AUXILIARY_URL_TEXT (response-confirmation.ts); inline porque roda serializado no frame.
+  if(/URL SOLICITADA\s*:\s*\/?CPI_API_REQUEST\.ASPX(?:\?\S*)?(?=[.,;"']?(?:\s|$))/.test(visibleText))signals.push('URL SOLICITADA: /CPI_API_REQUEST.ASPX');
   return {titles,cpfText,pesquisaType,status:selected??unique('STATUS:'),savedStatus:unique('STATUS:'),
     savedResult:unique('RESULTADO:'),savedSource:unique('PESQUISADOR/FONTE:'),responseTimestamp:unique('RESPONDIDA EM:'),pdfDocument:unique('EM ARQUIVO:'),
     editableUploadPresent:!!document.querySelector('input[type="file"]'),errorSignals:signals.join(' '),

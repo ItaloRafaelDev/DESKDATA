@@ -226,11 +226,23 @@ test('E3/W11/W12: abrir detalhe sem resposta falha no prazo, etapa registrada co
   assert.deepEqual(steps,['cpi_open_detail:failed']);
   assert.throws(()=>driver.readValidatedCpf(ids),/Abra e valide/);
 });
-test('E3/W18/W19: fechar detalhe sem resposta falha no prazo (o ciclo vai para revisão; nada é reenviado)',async()=>{
+const confirmedSave={...ids,frame:{},url:'https://adm.cpicentral.com.br/x.aspx',cpf:'52998224725',classification:'information',auxiliary404:false};
+test('E3/W18: conferência da resposta salva sem resposta vira indisponível no prazo (verificação manual; nada é reenviado)',async()=>{
+  const {page,clicks}=fakePage();page.context=()=>({newPage:hang});
+  const driver=driverWith(page,{verifySave:60,closeDetail:60,modalState:60});driver.lastConfirmedSave={...confirmedSave};
+  const report=await within(1000,()=>driver.finalizeSubmittedResponse(ids));
+  assert.equal(report.persistence,'unavailable');assert.equal(report.modal,'not_attempted');assert.deepEqual(clicks,[]);
+  // Estado do modal ilegível no prazo conta como aberto: navegador retido (fail-closed).
+  assert.equal(report.browserReleased,false);
+  await assert.rejects(within(1000,()=>driver.inspectPendingPersonDetails(ids)),/Pendência operacional CPI/);
+});
+test('E3/W19: fechar o modal sem resposta respeita o prazo e não invalida a persistência já comprovada',async()=>{
   const {page,clicks}=fakePage();
-  const driver=driverWith(page,{closeDetail:60});driver.lastConfirmedSave={...ids,frame:{}};
-  const error=await within(1000,()=>driver.closeCompletedDetail(ids).catch(e=>e));
-  assert.equal(classifyCpiError(error),'timeout');assert.deepEqual(clicks,[]);
+  const driver=driverWith(page,{verifySave:60,closeDetail:60,modalState:60});driver.lastConfirmedSave={...confirmedSave};
+  driver.probePersisted=async()=>({verdict:'confirmed',auxiliary404:false});
+  const report=await within(1000,()=>driver.finalizeSubmittedResponse(ids));
+  assert.deepEqual(report,{persistence:'confirmed',auxiliary404:false,modal:'close_failed',listing:'not_attempted',browserReleased:false});
+  assert.deepEqual(clicks,[]);
 });
 test('E3: reconciliação sem resposta vira indisponível no prazo (nunca confirmação)',async()=>{
   const {page}=fakePage();
@@ -271,22 +283,22 @@ test('E3/C9: parar o monitor com leitura do filtro presa termina no prazo do fil
 });
 
 // ---------- salvar na CPI (W13–W16): portal simulado em Edge headless, sem rede ----------
-test('E3/W13: prazo do salvamento antes do anexo devolve not_submitted e o corpo tardio não anexa nem clica',()=>portalFixture({},async({driver,pdf,posts,attachedFile})=>{
+test('E3/W13: prazo antes do anexo retém o modal, e o corpo tardio não anexa nem clica',()=>portalFixture({},async({driver,pdf,posts,attachedFile})=>{
   driver.timeouts={...driver.timeouts,save:100};
   const original=driver.readDetailFrame.bind(driver);const gate=deferred();
   driver.readDetailFrame=async(...args)=>{await gate.promise;return original(...args);};
-  assert.equal(await within(2000,()=>driver.uploadAndSavePersonResponse(ids,pdf,'information',100)),'not_submitted');
+  assert.equal(await within(2000,()=>driver.uploadAndSavePersonResponse(ids,pdf,'information',100)),'not_submitted_held');
   gate.resolve();await wait(1500);
   assert.equal(posts(),0);assert.equal(attachedFile(),null);
 }));
 test('E3/W16: espera sem fim depois do clique em Alterar vira unverified, sem segundo envio',()=>portalFixture({},async({driver,pdf,posts})=>{
   const reached=deferred();
-  driver.savedResponseEvidence=()=>{reached.resolve();return hang();};
+  driver.waitForFormExit=()=>{reached.resolve();return hang();};
   const saving=driver.uploadAndSavePersonResponse(ids,pdf,'information',2000);
   await reached.promise;
   // Simula cpi:close sem encerrar o navegador do fixture: mesmo caminho de cancelamento do prazo.
   driver.session.abort();
   assert.equal(await within(500,()=>saving),'unverified');
   await wait(300);assert.equal(posts(),1);
-  await assert.rejects(driver.closeCompletedDetail(ids),/resposta não confirmada/);
+  await assert.rejects(driver.finalizeSubmittedResponse(ids),/resposta não confirmada/);
 }));

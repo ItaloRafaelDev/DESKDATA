@@ -138,15 +138,27 @@ export class CpiFullAutoRunner {
         }else{
           idleDelay=null;
           const outcome=result.outcome,c=this.snapshot.counters;
+          if(outcome.state==='dry_run'){
+            // Ensaio: um item por execução, para conferência visual no portal antes de qualquer envio real.
+            this.controller?.abort();
+            this.publish({checks,lastCycleMs,phase:'paused',nextCheckAt:null,currentItem:null,failureStreak:null,
+              lastMessage:`Pesquisa ${outcome.pesquisaId}: ${outcome.message} Agente pausado após o ensaio.`});
+            return;
+          }
           const counters={...c,
             completed:c.completed+(outcome.state==='completed'?1:0),
             review:c.review+(outcome.state==='review_required'||outcome.state==='verification_required'?1:0),
             pending:c.pending+(outcome.state==='pending'?1:0)};
           // Item adiado (Deskdata em processamento) não deve acelerar a varredura da mesma listagem.
           delaySeconds=outcome.state==='pending'?CPI_IDLE_FIRST_SECONDS:CPI_AFTER_ITEM_SECONDS;
-          this.publish({checks,lastCycleMs,counters,lastMessage:outcome.warning==='auxiliary_404'
-            ?'CPI respondeu e anexou PDF, mas houve erro 404 em recurso auxiliar. Verifique a integracao externa.'
-            :`Pesquisa ${outcome.pesquisaId}: ${outcome.message}`});
+          // Avisos (404 auxiliar, modal, listagem) já vêm na mensagem e não alteram o estado nem pausam o agente.
+          this.publish({checks,lastCycleMs,counters,lastMessage:`Pesquisa ${outcome.pesquisaId}: ${outcome.message}`});
+          // Pendência operacional: o estado da pesquisa já foi gravado, mas nenhuma outra é aberta com a janela aberta.
+          if(outcome.browserHold){
+            this.countFailure('cpi_operational');
+            this.halt(`Pesquisa ${outcome.pesquisaId}: ${outcome.message.replace(/[.\s]+$/,'')}. Automação pausada: feche a janela da pesquisa na CPI e retome; nada será reenviado.`);
+            return;
+          }
           if(outcome.state==='verification_required'){
             if(this.countFailure('submit_unverified')){this.halt(this.streakMessage('submit_unverified'));return;}
           }else this.publish({failureStreak:null});

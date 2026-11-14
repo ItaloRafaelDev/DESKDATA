@@ -56,12 +56,16 @@ for(const [value,result] of [[' Civil ','information'],['Cível','information'],
   });
 }
 
-for(const item of [{court_type:'XXXXX'},{court_type:'UNKNOWN'},{court_type:'Civil / Criminal'},
-  {court_type:42},{court_type:{}},{court_type:''},{},{court_type:'Criminal',competence:'Civil'},
-  {court_type:'',competence:'Criminal'},{court_type:' ',competence:'',competencia:'Civil'}]){
-  test(`judicial: campo não comprovado exige revisão (${JSON.stringify(item)})`,()=>{
-    assert.deepEqual(classifyCpiPerson(normalized({items:[item]})),{state:'review_required',reason:'unknown_competence'});
-    assert.doesNotMatch(report(normalized({items:[item]})),/class="processo criminal"/);
+// Regra CPI aprovada: a palavra CRIMINAL em court_type/competence/competencia é restrição; vazio ou
+// desconhecido é Há Informações; somente tipo não textual vai para revisão. O destaque do PDF é inalterado.
+for(const [item,expected] of [[{court_type:'XXXXX'},'information'],[{court_type:'UNKNOWN'},'information'],
+  [{court_type:'Civil / Criminal'},'restrictions'],[{court_type:42},'review'],[{court_type:{}},'review'],
+  [{court_type:''},'information'],[{},'information'],[{court_type:'Criminal',competence:'Civil'},'restrictions'],
+  [{court_type:'',competence:'Criminal'},'restrictions'],[{court_type:' ',competence:'',competencia:'Civil'},'information']]){
+  test(`judicial: regra CPI para campo não canônico (${JSON.stringify(item)}) => ${expected}`,()=>{
+    const result=classifyCpiPerson(normalized({items:[item]}));
+    if(expected==='review')assert.deepEqual(result,{state:'review_required',reason:'unknown_competence'});
+    else assert.deepEqual(result,{state:'classified',result:expected,count:1});
   });
 }
 
@@ -70,11 +74,11 @@ test('judicial: texto de vara, assunto, tipo e participação não infere crimin
   assert.equal(classifyCpiPerson(data).result,'information');assert.doesNotMatch(report(data),/class="processo criminal"/);
 });
 
-test('judicial: campo alternativo não vazio é exibido sem autorizar equivalência nem destaque',()=>{
+test('judicial: campo alternativo criminal é exibido sem destaque no PDF e vale como restrição na CPI',()=>{
   const data=normalized({items:[{court_type:' ',competence:'',competencia:'Criminal'}]});
   const html=report(data);
   assert.match(html,/Criminal/);assert.doesNotMatch(html,/class="processo criminal"/);
-  assert.deepEqual(classifyCpiPerson(data),{state:'review_required',reason:'unknown_competence'});
+  assert.deepEqual(classifyCpiPerson(data),{state:'classified',result:'restrictions',count:1});
 });
 
 test('judicial: processos mistos são preservados integralmente e sem mutar JSON',()=>{
@@ -88,9 +92,9 @@ test('judicial: processos mistos são preservados integralmente e sem mutar JSON
   assert.equal((html.match(/class="processo criminal"/g)||[]).length,1);
 });
 
-test('judicial: criminal conhecido não libera lista com outro processo desconhecido',()=>{
+test('judicial: criminal conhecido prevalece sobre outro processo de competência desconhecida',()=>{
   assert.deepEqual(classifyCpiPerson(normalized({items:[{court_type:'Criminal'},{court_type:'XXXXX'}]})),
-    {state:'review_required',reason:'unknown_competence'});
+    {state:'classified',result:'restrictions',count:2});
 });
 
 test('judicial: classificador revalida contadores mesmo se o normalizador for contornado',()=>{

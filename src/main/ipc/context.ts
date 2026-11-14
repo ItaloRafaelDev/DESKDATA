@@ -56,6 +56,8 @@ export interface MainContext {
   credentials: CredentialStore;
   diagnostics: DiagnosticLogger;
   dataDir: string;
+  /** Modo ensaio da resposta CPI: somente fora do instalador e com DESKDATA_CPI_ENSAIO=1. */
+  cpiRehearsal: boolean;
   getSettings: () => Promise<AppSettings>;
   pickOutputFolder: () => Promise<string | null>;
   saveOutputFolder: (folder: string) => Promise<AppSettings>;

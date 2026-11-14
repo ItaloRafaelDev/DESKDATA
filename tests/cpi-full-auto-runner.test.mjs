@@ -71,7 +71,7 @@ test('falha de item vai para revisão e o agente segue para os próximos itens',
     {kind:'item_failed',found:3,ids:ids(1),failure:'item_data',message:'CPF ausente ou inválido no formulário da CPI.'},
     {kind:'item',found:2,outcome:outcome(2,'completed')},
     {kind:'item',found:1,outcome:outcome(3,'review_required')},
-    {kind:'item',found:1,outcome:outcome(4,'completed',{warning:'auxiliary_404'})}
+    {kind:'item',found:1,outcome:outcome(4,'completed',{warnings:['auxiliary_404','modal_open']})}
   ];
   let calls=0;const clock=virtualClock(10);
   const run=runnerWith(async()=>results[calls++]??idle,clock);
@@ -189,4 +189,52 @@ test('snapshot expõe somente códigos CPI, contadores e duração do ciclo',asy
 test('exibe motivo da falha sem mostrar CPF ou URL', () => {
   assert.doesNotMatch(safeCpiCycleError(new Error('CPF 123.456.789-09 na URL https://example.com/teste')), /123|example.com/);
   assert.match(safeCpiCycleError(new Error('CPF 123.456.789-09 na URL https://example.com/teste')), /\[CPF\]|\[URL\]/);
+});
+
+test('ensaio: um item dry_run pausa o agente com a mensagem do ensaio, sem contar conclusão nem falha',async()=>{
+  let calls=0;const clock=virtualClock(600);
+  const run=runnerWith(async()=>{calls++;return {kind:'item',found:2,outcome:outcome(1,'dry_run',{message:'Ensaio concluído (Há Informações): campos preenchidos e PDF anexado; nada foi salvo.'})};},clock);
+  await run.start(60);
+  while(run.isActive())await nextTurn();
+  const status=run.status();
+  assert.equal(calls,1);assert.equal(status.phase,'paused');
+  assert.match(status.lastMessage,/Ensaio concluído.*Agente pausado após o ensaio/);
+  assert.deepEqual(status.counters,{completed:0,review:0,failures:0,pending:0});
+});
+
+// Auditoria: persistência confirmada com janela conflitante grava a conclusão, mas não abre outra pesquisa.
+test('pesquisa concluída com navegador retido (browserHold) pausa o agente na hora, sem abrir o próximo item',async()=>{
+  let calls=0;const clock=virtualClock();
+  const held=outcome(1,'completed',{warnings:['modal_open'],browserHold:true,message:'Resposta CPI confirmada. Avisos: a janela da pesquisa continua aberta.'});
+  const run=runnerWith(async()=>{calls++;return calls===1?{kind:'item',found:2,outcome:held}:{kind:'item',found:1,outcome:outcome(2,'completed')};},clock);
+  await run.start(300);
+  while(run.isActive())await nextTurn();
+  assert.equal(calls,1,'nenhuma varredura depois da retenção');
+  const state=run.status();
+  assert.equal(state.phase,'error');assert.equal(state.counters.completed,1);
+  assert.deepEqual(state.failureStreak,{kind:'cpi_operational',count:1});
+  assert.match(state.lastMessage,/Automação pausada: feche a janela da pesquisa/);
+  assert.match(state.lastMessage,/nada será reenviado/);
+});
+
+test('verificação manual com navegador retido também pausa na hora',async()=>{
+  let calls=0;const clock=virtualClock();
+  const run=runnerWith(async()=>{calls++;return {kind:'item',found:1,outcome:outcome(1,'verification_required',{browserHold:true})};},clock);
+  await run.start(300);
+  while(run.isActive())await nextTurn();
+  assert.equal(calls,1);assert.equal(run.status().phase,'error');assert.equal(run.status().counters.review,1);
+});
+
+test('pendência operacional do navegador é parada imediata, inclusive encapsulada pela etapa do filtro',async()=>{
+  const { classifyCpiError, CPI_IMMEDIATE_STOP } = await import('../src/main/cpi/failure-classes.ts');
+  const hold=new Error('Pendência operacional CPI: resposta confirmada na CPI, mas a janela da pesquisa continua aberta. Feche a janela manualmente na CPI antes de continuar; nenhuma pesquisa será aberta até lá.');
+  assert.equal(classifyCpiError(hold),'cpi_operational');
+  assert.equal(classifyCpiError(new Error('Etapa filtro CPI 29: falha ao atualizar a listagem.',{cause:hold})),'cpi_operational');
+  assert.ok(CPI_IMMEDIATE_STOP.has('cpi_operational'));
+  let calls=0;const clock=virtualClock();
+  const run=runnerWith(async()=>{calls++;throw new Error('Etapa filtro CPI 29: falha ao atualizar a listagem.',{cause:hold});},clock);
+  await run.start(300);
+  while(run.isActive())await nextTurn();
+  assert.equal(calls,1);assert.equal(run.status().phase,'error');
+  assert.match(run.status().lastMessage,/janela CPI aberta após envio/);
 });

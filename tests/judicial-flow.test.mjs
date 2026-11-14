@@ -17,9 +17,8 @@ const payload=lawsuits=>({status:{code:4000},data:{basic:{tax_id:{number:cpf}},p
 
 for(const [lawsuits,reason] of [
   [{total:2,items:[]},'total_mismatch'],
-  [{items:[{court_type:'Criminal'},{court_type:'XXXXX'}]},'unknown_court_type'],
-  [{items:[{number:'PROCESSO-FICTICIO'}]},'missing_court_type'],
-  [{items:[{court_type:'',competence:'Criminal'}]},'unverified_competence_alias']
+  [{items:[{court_type:'Criminal'},{court_type:23}]},'invalid_court_type'],
+  [{items:[{number:'PROCESSO-FICTICIO',competencia:['Criminal']}]},'invalid_court_type']
 ]){
   test(`judicial: ciclo persiste ${reason}, conserva histórico e não chega ao envio`,async()=>{
     const directory=await mkdtemp(join(tmpdir(),'deskdata-judicial-'));
@@ -32,7 +31,7 @@ for(const [lawsuits,reason] of [
         getJob:()=>store.get(account,ids),claim:()=>store.claim(account,ids),mark:(stage,updates)=>store.mark(account,ids,stage,updates),
         findLatest:async()=>record,checkByCode:async()=>{gets++;return {state:'ready',queryCode:code,payload:payload(lawsuits)};},
         beginHistory:forbidden,setQueryCode:forbidden,getCredits:forbidden,verifyPaidBalance:forbidden,
-        paidApproved:forbidden,submitCpf:forbidden,savePdf:forbidden,uploadAndSave:forbidden,closeCompletedDetail:forbidden};
+        paidApproved:forbidden,submitCpf:forbidden,savePdf:forbidden,uploadAndSave:forbidden,finalizeSubmitted:forbidden};
       const result=await executeCpiPersonCycle(services);
       assert.equal(result.state,'review_required');assert.equal(result.reviewReason,reason);
       assert.equal(gets,1);assert.deepEqual(record,before);
@@ -46,15 +45,18 @@ for(const [lawsuits,reason] of [
   });
 }
 
-test('judicial: diagnóstico diferencia ausência, vazio, formato inválido e desconhecido sem dados pessoais',()=>{
-  for(const [item,expected] of [[{},'missing_court_type'],[{court_type:''},'empty_court_type'],
-    [{court_type:23},'invalid_court_type'],[{court_type:'DADO-PRIVADO-NAO-REGISTRAR'},'unknown_court_type'],
-    [{court_type:'Civil',competencia:'Criminal'},'conflicting_competence']]){
+test('judicial: regra CPI classifica ausência, vazio e desconhecido; só formato inválido vai para revisão',()=>{
+  for(const [item,expected] of [[{},'information'],[{court_type:''},'information'],
+    [{court_type:'DADO-PRIVADO-NAO-REGISTRAR'},'information'],[{court_type:'Civil',competencia:'Criminal'},'restrictions'],
+    [{court_type:'',competence:'Criminal'},'restrictions']]){
     const assessment=assessCpiPerson(normalizeDeskdataResponse(payload({items:[item]})));
-    assert.equal(assessment.classification.state,'review_required');
-    assert.equal(assessment.issues[0].code,expected);assert.equal(assessment.issues[0].itemIndex,0);
-    assert.doesNotMatch(JSON.stringify(assessment.issues),/DADO-PRIVADO|529982|Criminal/);
+    assert.equal(assessment.classification.state,'classified');
+    assert.equal(assessment.classification.result,expected);
   }
+  const invalid=assessCpiPerson(normalizeDeskdataResponse(payload({items:[{court_type:'DADO-PRIVADO',competence:23}]})));
+  assert.equal(invalid.classification.state,'review_required');
+  assert.equal(invalid.issues[0].code,'invalid_court_type');assert.equal(invalid.issues[0].itemIndex,0);
+  assert.doesNotMatch(JSON.stringify(invalid.issues),/DADO-PRIVADO|529982|Criminal/);
 });
 
 test('judicial: resposta incompleta fica recuperável sem PDF, sem ready e sem novo histórico',async()=>{
@@ -116,7 +118,7 @@ test('judicial: PDF ready legado não substitui relatório da resposta usada na 
       },
       uploadAndSave:async(path,classification)=>{
         uploads++;assert.equal(path,newPath);assert.equal(classification,'restrictions');return 'unverified';
-      },closeCompletedDetail:forbidden};
+      },finalizeSubmitted:forbidden};
     assert.equal((await executeCpiPersonCycle(services)).state,'verification_required');
     assert.equal(renders,1);assert.equal(uploads,1);assert.deepEqual(await readFile(oldPath),oldBytes);
     assert.equal((await executeCpiPersonCycle(services)).state,'review_required');
