@@ -150,6 +150,42 @@ test('CPI: modo ensaio preenche e anexa, cancela o diálogo e não envia nada',(
   assert.equal(await modalVisible(page),false);assert.equal(posts(),0);
 }));
 
+// ---------- leitura do modal que falha: conta como aberto (fail-closed via modalOpen) ----------
+/** A leitura de visibilidade do #sb-container rejeita `times` vezes (padrão: sempre); o resto do locator é real. */
+function failModalReads(page,times=Infinity){
+  const original=page.locator.bind(page);let left=times;
+  page.locator=(selector,...rest)=>{
+    const real=original(selector,...rest);
+    if(selector!=='#sb-container')return real;
+    const wrapped=Object.create(real);
+    wrapped.isVisible=(...args)=>left-->0?Promise.reject(new Error('leitura indisponível')):real.isVisible(...args);
+    return wrapped;
+  };
+  return ()=>{page.locator=original;};
+}
+test('CPI: leitura do modal que falha não dispensa a identidade: formulário de outra pesquisa não é fechado',()=>portalFixture({},async({driver,page,posts,closes})=>{
+  const restore=failModalReads(page,1);
+  await assert.rejects(driver.closeDetailWithoutSaving({pesquisaId:'999999',solicitacaoId:'888888'}),/não corresponde à pesquisa ensaiada/);
+  restore();
+  assert.equal(await closes(),0);assert.equal(await modalVisible(page),true);assert.equal(posts(),0);
+}));
+test('CPI: leitura do modal que falha não vira "já fechado": identidade conferida e fechamento pelo controle único',()=>portalFixture({},async({driver,page,posts,closes})=>{
+  const restore=failModalReads(page);
+  await driver.closeDetailWithoutSaving(ids);
+  restore();
+  assert.equal(await closes(),1);assert.equal(await modalVisible(page),false);assert.equal(posts(),0);
+}));
+test('CPI: leitura do modal que falha durante POST com HTTP 500 tardio não confirma o envio nem reenvia',()=>portalFixture({
+  afterPost:async route=>{await new Promise(resolve=>setTimeout(resolve,2500));await route.fulfill({status:500,contentType:'text/html',body:'<h1>Erro de servidor no aplicativo</h1>'});}
+},async({driver,page,pdf,posts})=>{
+  const restore=failModalReads(page);
+  assert.equal(await driver.uploadAndSavePersonResponse(ids,pdf,'information',6000),'unverified');
+  restore();
+  assert.equal(posts(),1);
+  await assert.rejects(driver.finalizeSubmittedResponse(ids),/resposta não confirmada/);
+  await assert.rejects(driver.inspectPendingPersonDetails(ids),/Pendência operacional CPI/);
+}));
+
 // ---------- finalização: persistência (GET independente) → modal → listagem ----------
 const confirmedReport=(extra={})=>({persistence:'confirmed',auxiliary404:false,modal:'closed',listing:'refreshed',browserReleased:true,...extra});
 function refreshSpy(driver){const refreshed=[];driver.refreshAfterSave=async(_page,done)=>{refreshed.push(done);};return refreshed;}
