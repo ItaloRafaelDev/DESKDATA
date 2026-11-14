@@ -98,7 +98,7 @@ export class CpiWorkflowStore {
     await mkdir(this.directory,{recursive:true});
     const temporary=join(this.directory,`cpi-workflows-${randomUUID()}.tmp`);
     try{await writeFile(temporary,cipher,{flag:'wx',mode:0o600});await rename(temporary,this.path);}
-    catch{await unlink(temporary).catch(()=>{});throw new Error('Falha ao persistir a fila CPI. Operação bloqueada.');}
+    catch(error){await unlink(temporary).catch(()=>{});throw new Error('Falha ao persistir a fila CPI. Operação bloqueada.',{cause:error});}
     const written=await this.signature().catch(()=>null);
     if(written&&written.size===cipher.length)this.cache={signature:written,data:structuredClone(data)};
   }
