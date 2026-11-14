@@ -368,7 +368,8 @@ export class CpiBrowser {
   /** Fecha a Shadowbox "Responder / Atualizar Pesquisa" pelo controle único do portal; nunca fecha duas vezes. */
   private async closeShadowbox(page: Page, signal: AbortSignal, label: string): Promise<'closed'|'already_hidden'> {
     const modal = page.locator('#sb-container');
-    if (!await modal.isVisible().catch(() => false)) return 'already_hidden';
+    // Leitura que falha não prova modal fechado: segue para a validação do título e do controle único.
+    if (!await this.modalOpen(page, signal)) return 'already_hidden';
     const title = (await page.locator('#sb-title-inner').innerText({timeout:4000})).trim();
     if (!/Responder\s*\/\s*Atualizar Pesquisa/i.test(title)) {
       throw new Error('Modal CPI inesperado. Fechamento manual necessário.');
@@ -507,7 +508,7 @@ export class CpiBrowser {
     if (!this.page || this.status().state !== 'open') throw new Error('Sessão CPI indisponível.');
     const page = this.page;
     await this.bounded('cpi_close_detail', this.timeouts.closeDetail, async signal => {
-      if (await page.locator('#sb-container').isVisible().catch(() => false) && !await this.readDetailFrame(ids)) {
+      if (await this.modalOpen(page, signal) && !await this.readDetailFrame(ids)) {
         throw new Error('O formulário aberto não corresponde à pesquisa ensaiada. Fechamento manual necessário.');
       }
       await this.closeShadowbox(page, signal, 'cpi_close_detail');
@@ -619,7 +620,8 @@ export class CpiBrowser {
     while (Date.now() < deadline) {
       throwIfAborted(signal, 'cpi_save');
       if (state.failed) return 'failed';
-      const modalVisible = await page.locator('#sb-container').isVisible().catch(() => false);
+      // Leitura que falha conta como aberto: sem evidência continua aguardando e, no prazo, fica 'unverified'.
+      const modalVisible = await this.modalOpen(page, signal);
       if (state.navigated || frame.isDetached() || !modalVisible) {
         // Pequena janela para alert de erro disparado pela página de resposta.
         await page.waitForTimeout(1200);
